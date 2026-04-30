@@ -1,0 +1,37 @@
+model
+  schema 1.1
+
+# Example model adapted from the OpenFGA "GitHub" sample. Demonstrates
+# every rewrite primitive the evaluator implements:
+#
+#   - `this` with direct user, userset reference, and typed wildcard
+#   - `computedUserset` (alias to another relation on the same object)
+#   - `tupleToUserset` ("X from Y")
+#   - `union`, `intersection` (via test fixtures), `difference`
+#
+# Used by the integration test (tests/integration/persistence.test.ts)
+# and as the load-model target in the README quick-start.
+
+type user
+
+type organization
+  relations
+    define member: [user]
+    define admin: [user]
+    define repo_admin: [user, organization#member]
+    define repo_writer: [user, organization#member]
+    define repo_reader: [user, organization#member]
+
+type team
+  relations
+    define maintainer: [user]
+    define member: [user, team#member]
+    define banned: [user]
+    define active_member: (maintainer or member) but not banned
+
+type repo
+  relations
+    define owner: [organization]
+    define admin: [user, team#member] or repo_admin from owner
+    define writer: [user, team#member] or admin or repo_writer from owner
+    define reader: [user, team#member, user:*] or writer or repo_reader from owner

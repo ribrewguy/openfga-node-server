@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "openfga",
+  "project_id": "59e914ee-618e-49be-bbc4-916c1a6bc271"
+}
