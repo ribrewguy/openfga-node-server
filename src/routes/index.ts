@@ -41,6 +41,7 @@ import { check } from '../evaluator/check'
 import { listObjects } from '../evaluator/list-objects'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
+import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
 
 /**
  * True when the Content-Type advertises an OpenFGA DSL body.
@@ -90,6 +91,12 @@ export function buildApp(): Hono {
   const app = new Hono()
 
   app.use('*', requestLog)
+
+  // Caller authentication. Mounted on /stores/* so /health stays
+  // reachable for liveness probes without credentials. Mode is
+  // chosen at boot from OPENFGA_AUTH_MODE; see src/middleware/auth.ts
+  // for the dispatch and the supported modes.
+  app.use('/stores/*', authMiddleware(loadAuthConfigFromEnv()))
 
   // Idempotency-Key support for the three mutating endpoints in scope
   // (PRD §"Idempotency keys", docs/features/idemnpotency-keys.md).
