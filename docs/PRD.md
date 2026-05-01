@@ -111,6 +111,18 @@ shapes, and idempotency persistence must live outside the `openfga`
 schema so the schema-compatible migration path to upstream OpenFGA
 remains intact.
 
+### OpenTelemetry observability
+
+The server supports OpenTelemetry tracing at the HTTP middleware
+boundary. Tracing must respect incoming OpenTelemetry propagation
+headers so this server can participate in traces that started upstream.
+
+The default captured request headers must include the standard
+propagation headers `traceparent`, `tracestate`, and `baggage`.
+Operators can override captured request headers, captured response
+headers, service metadata, exporter configuration, and related
+OpenTelemetry settings through environment variables.
+
 ## Operational shape
 
 - Single Node process. No external service dependencies beyond
@@ -142,8 +154,6 @@ No application code changes. No SDK changes. No model changes.
 - Authorization model conditions / ABAC.
 - The remaining OpenFGA endpoints.
 - Caching layer in front of `check` (the upstream server has one).
-- Observability hooks (OpenTelemetry, structured logs at the route
-  boundary).
 - A reverse-expansion algorithm for `list-objects` that doesn't fall
   back to per-candidate `check()`.
 
