@@ -73,15 +73,23 @@ async function claimWithClient(
   fingerprint: string,
   ttlMs: number,
 ): Promise<ClaimResult> {
-  const cutoff = new Date(Date.now() - ttlMs).toISOString()
-
-  // Drop any expired record for this key so it doesn't block a new
-  // claim. Bounded by the PK lookup, so this is O(1) amortized even
-  // though the table will accumulate rows between TTL windows.
+  // Compute the TTL cutoff in SQL so it shares the clock that wrote
+  // `created_at`. A JS-computed cutoff (Date.now() - ttlMs) compared
+  // against the row's Postgres-assigned `created_at` is a clock-skew
+  // race: even microsecond drift between the application container
+  // and the DB can leave rows strictly after the JS cutoff, making
+  // the DELETE silently miss them and the SELECT then return them
+  // with a stale fingerprint.
+  //
+  // Postgres `now()` returns transaction-start time, which is
+  // monotonic across separate (autocommit) transactions on the same
+  // connection — so any row inserted by an earlier query can never
+  // appear "future-dated" relative to a later cutoff.
   await client.query(
     `DELETE FROM openfga.idempotency_keys
-      WHERE key = $1 AND created_at < $2`,
-    [key, cutoff],
+      WHERE key = $1
+        AND created_at < now() - $2::int * interval '1 millisecond'`,
+    [key, ttlMs],
   )
 
   const insert = await client.query<{ key: string }>(
@@ -97,8 +105,9 @@ async function claimWithClient(
   const lookup = await client.query<IdempotencyRow>(
     `SELECT request_hash, status, response_status, response_body
        FROM openfga.idempotency_keys
-      WHERE key = $1 AND created_at >= $2`,
-    [key, cutoff],
+      WHERE key = $1
+        AND created_at >= now() - $2::int * interval '1 millisecond'`,
+    [key, ttlMs],
   )
   const row = lookup.rows[0]
 
