@@ -27,6 +27,7 @@
  */
 import { Hono } from 'hono'
 import type { CheckRequest, ListObjectsRequest, ReadRequest, WriteRequest, AuthorizationModel } from '@openfga/sdk'
+import { transformer, errors as transformerErrors } from '@openfga/syntax-transformer'
 import { createStore } from '../storage/stores'
 import {
   getAuthorizationModel,
@@ -40,6 +41,50 @@ import { check } from '../evaluator/check'
 import { listObjects } from '../evaluator/list-objects'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
+
+/**
+ * True when the Content-Type advertises an OpenFGA DSL body.
+ *
+ * `application/x-openfga-dsl` is the preferred type. `text/plain` is
+ * accepted as a fallback because curl, ad-hoc scripts, and many
+ * static-file servers default to it. Parameters such as `; charset=utf-8`
+ * are tolerated per RFC 7231 §3.1.1.1.
+ */
+function isDslContentType(header: string | undefined): boolean {
+  if (!header) return false
+  const type = header.split(';', 1)[0]!.trim().toLowerCase()
+  return type === 'application/x-openfga-dsl' || type === 'text/plain'
+}
+
+/**
+ * Render a transformer error as a client-facing message. The
+ * transformer's syntax/validation errors carry zero-based line and
+ * column information; this surfaces 1-based positions because that is
+ * what almost every editor reports and what is least surprising to a
+ * human reading the response.
+ */
+function formatDslError(err: unknown): string {
+  if (err instanceof transformerErrors.DSLSyntaxError && err.errors.length > 0) {
+    const first = err.errors[0]!
+    const line = first.line ? first.line.start + 1 : undefined
+    const col = first.column ? first.column.start + 1 : undefined
+    if (line !== undefined && col !== undefined) {
+      return `DSL parse error at line ${line}, column ${col}: ${first.msg}`
+    }
+    return `DSL parse error: ${first.msg}`
+  }
+  if (err instanceof transformerErrors.ModelValidationError && err.errors.length > 0) {
+    const first = err.errors[0]!
+    const line = first.line ? first.line.start + 1 : undefined
+    const col = first.column ? first.column.start + 1 : undefined
+    if (line !== undefined && col !== undefined) {
+      return `DSL validation error at line ${line}, column ${col}: ${first.msg}`
+    }
+    return `DSL validation error: ${first.msg}`
+  }
+  if (err instanceof Error) return `DSL error: ${err.message}`
+  return 'DSL error'
+}
 
 export function buildApp(): Hono {
   const app = new Hono()
@@ -84,14 +129,37 @@ export function buildApp(): Hono {
     const store = await getStore(storeId)
     if (!store) return c.json({ code: 'not_found', message: 'store not found' }, 404)
 
-    const body = await c.req.json<Partial<AuthorizationModel>>().catch(() => ({} as Partial<AuthorizationModel>))
-    if (!Array.isArray(body.type_definitions)) {
+    let model: Partial<AuthorizationModel>
+    if (isDslContentType(c.req.header('content-type'))) {
+      // DSL branch — driven by Red Planet's deploy-from-.fga use case.
+      // The transformer is the same one src/cli/load-model.ts uses; the
+      // resulting JSON feeds the existing JSON path verbatim, so the
+      // storage layer never sees DSL.
+      let dsl: string
+      try {
+        dsl = await c.req.text()
+      }
+      catch {
+        return c.json({ code: 'invalid_argument', message: 'failed to read DSL request body' }, 400)
+      }
+      try {
+        model = transformer.transformDSLToJSONObject(dsl) as Partial<AuthorizationModel>
+      }
+      catch (err) {
+        return c.json({ code: 'invalid_argument', message: formatDslError(err) }, 400)
+      }
+    }
+    else {
+      model = await c.req.json<Partial<AuthorizationModel>>().catch(() => ({} as Partial<AuthorizationModel>))
+    }
+
+    if (!Array.isArray(model.type_definitions)) {
       return c.json({ code: 'invalid_argument', message: 'type_definitions required' }, 400)
     }
     const row = await writeAuthorizationModel(storeId, {
-      schema_version: body.schema_version ?? '1.1',
-      type_definitions: body.type_definitions,
-      conditions: body.conditions,
+      schema_version: model.schema_version ?? '1.1',
+      type_definitions: model.type_definitions,
+      conditions: model.conditions,
     })
     return c.json({ authorization_model_id: row.id })
   })
