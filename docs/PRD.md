@@ -18,11 +18,6 @@ server in Node, runnable anywhere Node runs.
   deployments. The reference Go server has years of optimization on
   the rewrite-algebra hot path; we have straight DFS. If your check
   QPS or model depth pushes those limits, run the Go binary.
-- Implementing every OpenFGA endpoint. The scope is the surface
-  serverless Node apps actually call: stores, models, check, write,
-  read, list-objects. `expand`, `batch-check`, `list-users`,
-  `assertions`, `changes` return `501 Not Implemented` until a
-  consumer needs them.
 - ABAC / conditional tuples. The Postgres schema reserves space for
   conditions but the evaluator ignores them. Add when needed.
 
@@ -49,13 +44,18 @@ server in Node, runnable anywhere Node runs.
 
 ### Endpoints
 
-Implemented (8): `POST /stores`,
+Target: full OpenFGA REST API wire compliance for the supported
+authorization model and storage semantics. Implemented endpoints must
+match OpenFGA request and response shapes so `@openfga/sdk` clients work
+unchanged.
+
+Currently implemented: `POST /stores`,
 `{POST,GET} /stores/:storeId/authorization-models`,
 `GET /stores/:storeId/authorization-models/:id`,
 `POST /stores/:storeId/{check,write,read,list-objects}`.
 
-Not implemented (501): `expand`, `batch-check`, `list-users`,
-`assertions`, `changes`, `GET /stores`.
+Remaining endpoint gaps that must be closed: `GET /stores`, `expand`,
+`batch-check`, `list-users`, `assertions`, and `changes`.
 
 ### Evaluation algebra
 
@@ -155,7 +155,6 @@ No application code changes. No SDK changes. No model changes.
 ## Future scope (non-binding)
 
 - Authorization model conditions / ABAC.
-- The remaining OpenFGA endpoints.
 - Caching layer in front of `check` (the upstream server has one).
 - A reverse-expansion algorithm for `list-objects` that doesn't fall
   back to per-candidate `check()`.
