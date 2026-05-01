@@ -21,7 +21,7 @@ The server should support client-provided idempotency keys for mutating requests
 - Support the `Idempotency-Key` header for configured mutating endpoints.
 - Preserve existing OpenFGA response bodies for successful first requests and replayed successful requests.
 - Use persistent idempotency storage so retry protection survives process restarts and horizontal scaling.
-- Keep idempotency state outside the `openfga` schema to preserve the migration path to upstream OpenFGA.
+- Persist idempotency state in the `openfga` schema with a documented `pg_dump --exclude-table` recipe so the migration path to upstream OpenFGA is preserved operationally rather than by schema isolation.
 - Make rollout configurable so existing clients are not broken by default.
 
 ## Non-Goals
@@ -29,7 +29,7 @@ The server should support client-provided idempotency keys for mutating requests
 - Do not add idempotency to evaluator internals or storage repositories.
 - Do not require idempotency keys for read-style endpoints by default.
 - Do not generate idempotency keys for clients.
-- Do not add idempotency records to the `openfga` schema.
+- Do not couple idempotency persistence to OpenFGA wire shapes or evaluator state. The idempotency table lives alongside the OpenFGA tables in the same schema for operational simplicity, but it is not part of the OpenFGA-compatible state contract and must be excluded from schema dumps that target upstream migration.
 
 ## Endpoint Scope
 
@@ -57,9 +57,9 @@ Use a mode switch rather than a boolean so rollout behavior is explicit:
 
 Additional configuration:
 
-- `OPENFGA_IDEMPOTENCY_TTL_MS` sets record retention. The default should follow the middleware default of 24 hours unless this project chooses a different value.
-- `OPENFGA_IDEMPOTENCY_STORE` selects the backing store. Supported values should be introduced only when implemented.
-- Store-specific settings must not reuse `OPENFGA_DB_URL` if doing so would create idempotency tables in the `openfga` schema.
+- `OPENFGA_IDEMPOTENCY_TTL_MS` sets record retention. The default is 24 hours (`86400000`) unless this project chooses a different value.
+- The Postgres backing store reuses `OPENFGA_DB_URL` and writes to `openfga.idempotency_keys` in the same `openfga` schema as the OpenFGA tables. Operators cutting over to upstream OpenFGA must run `pg_dump --schema=openfga --exclude-table='openfga.idempotency_keys'` so the dump only carries OpenFGA-compatible state. The README quick-start and the migration recipe in the PRD document this requirement.
+- Future backing stores (for example Redis) may be added behind a configuration switch, but the v1 implementation is Postgres-only and does not introduce a store-selector environment variable until a second store actually exists.
 
 ## Middleware Ordering
 
@@ -73,12 +73,11 @@ Idempotency middleware should run before route handlers for scoped mutating endp
 
 Idempotency requires persistent storage. In-memory storage is not acceptable for production because it does not survive process restarts and cannot coordinate horizontally scaled instances.
 
-Preferred storage options:
+The v1 backing store is the same Postgres database the OpenFGA tables live in. The idempotency table is created in the `openfga` schema as `openfga.idempotency_keys`. The migration that creates it lives in `migrations/` alongside the OpenFGA migration so a single `pnpm migrate` brings the database to a working state.
 
-- A separate Postgres schema or database that is not `openfga`.
-- Redis with persistence enabled.
+The `openfga` schema must remain a faithful subset of the upstream OpenFGA reference schema so `pg_dump --schema=openfga` produces a valid migration source. The idempotency table is not part of the OpenFGA-compatible state contract. To preserve the migration path, operators run `pg_dump --schema=openfga --exclude-table='openfga.idempotency_keys'` when cutting over to upstream OpenFGA. The PRD documents this recipe in §"Migration path FROM this server TO upstream OpenFGA" or in §"Idempotency keys".
 
-The implementation must not add idempotency tables to the `openfga` schema. That schema is reserved for OpenFGA-compatible state and must remain suitable for `pg_dump --schema=openfga` migration to the upstream server.
+The implementation must not add other non-OpenFGA tables to the `openfga` schema. The `idempotency_keys` table is the single intentional exception, justified by operational simplicity and the documented `--exclude-table` workflow. Any future non-OpenFGA persistence (for example a feature flag table or a webhook queue) must use a different schema.
 
 ## Request Fingerprint
 
@@ -139,12 +138,12 @@ Logs must avoid raw `Idempotency-Key` values. If correlation is needed, log a st
 - Required mode rejects scoped mutating requests that omit `Idempotency-Key`.
 - Optional mode permits requests without `Idempotency-Key`.
 - Read-style POST endpoints are not subject to idempotency by default.
-- Idempotency records persist outside the `openfga` schema.
+- Idempotency records persist in the `openfga` schema in a dedicated `openfga.idempotency_keys` table that is separate from any OpenFGA table.
+- The migration recipe `pg_dump --schema=openfga --exclude-table='openfga.idempotency_keys'` is documented in the PRD or feature spec so operators can migrate to upstream OpenFGA without carrying idempotency state.
 - Tests cover off, optional, and required modes.
 - Documentation describes configuration, endpoint scope, storage requirements, and retention.
 
 ## Open Questions
 
-- Which backing store should be implemented first: separate-schema Postgres or Redis?
 - Should `/stores` require idempotency in production when idempotency is enabled, or should all scoped endpoints share the same mode?
 - Should replayed responses include idempotency status headers if the middleware provides them?
