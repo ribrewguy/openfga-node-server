@@ -99,6 +99,18 @@ The server supports OpenFGA-aligned API caller authentication modes:
 Authentication is enforced at the HTTP middleware boundary and must not
 change OpenFGA request or response shapes for authorized calls.
 
+### Idempotency keys
+
+The server supports the `Idempotency-Key` HTTP header for mutating API
+requests so clients can safely retry requests after timeouts, network
+failures, or ambiguous connection resets.
+
+Idempotency is enforced at the HTTP middleware boundary for configured
+mutating endpoints. It must not change successful OpenFGA response
+shapes, and idempotency persistence must live outside the `openfga`
+schema so the schema-compatible migration path to upstream OpenFGA
+remains intact.
+
 ## Operational shape
 
 - Single Node process. No external service dependencies beyond
