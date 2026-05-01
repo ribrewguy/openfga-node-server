@@ -39,11 +39,28 @@ import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { check } from '../evaluator/check'
 import { listObjects } from '../evaluator/list-objects'
 import { requestLog } from '../middleware/request-log'
+import { idempotencyMiddleware } from '../middleware/idempotency'
 
 export function buildApp(): Hono {
   const app = new Hono()
 
   app.use('*', requestLog)
+
+  // Idempotency-Key support for the three mutating endpoints in scope
+  // (PRD §"Idempotency keys", docs/features/idemnpotency-keys.md).
+  // Mode and TTL are read from OPENFGA_IDEMPOTENCY_MODE /
+  // OPENFGA_IDEMPOTENCY_TTL_MS at first request. Default mode is 'off'
+  // so existing clients are not affected until idempotency is enabled.
+  app.use(
+    '*',
+    idempotencyMiddleware({
+      scopes: [
+        { method: 'POST', path: '/stores' },
+        { method: 'POST', path: '/stores/:storeId/authorization-models' },
+        { method: 'POST', path: '/stores/:storeId/write' },
+      ],
+    }),
+  )
 
   app.get('/health', (c) => c.json({ status: 'ok' }))
 
