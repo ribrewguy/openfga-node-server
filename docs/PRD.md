@@ -107,9 +107,12 @@ failures, or ambiguous connection resets.
 
 Idempotency is enforced at the HTTP middleware boundary for configured
 mutating endpoints. It must not change successful OpenFGA response
-shapes, and idempotency persistence must live outside the `openfga`
-schema so the schema-compatible migration path to upstream OpenFGA
-remains intact.
+shapes. Idempotency persistence lives in the `openfga` schema for
+operational simplicity; the schema-compatible migration path to
+upstream OpenFGA is preserved by excluding the idempotency table at
+dump time
+(`pg_dump --schema=openfga --exclude-table='openfga.idempotency_keys'`),
+which operators run when cutting over.
 
 ### OpenTelemetry observability
 
