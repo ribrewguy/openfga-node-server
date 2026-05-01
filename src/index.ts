@@ -19,8 +19,8 @@ import 'dotenv/config'
 import { readFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { serve } from '@hono/node-server'
-import { buildApp } from './routes/index.js'
-import { logger } from './logger.js'
+import { buildApp } from './routes/index'
+import { logger } from './logger'
 
 const port = Number(process.env['PORT'] ?? 8080)
 

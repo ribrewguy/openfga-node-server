@@ -37,8 +37,8 @@
  */
 import { createHash } from 'node:crypto'
 import type { MiddlewareHandler } from 'hono'
-import { logger } from '../logger.js'
-import { claimKey, completeKey, releaseKey } from '../storage/idempotency.js'
+import { logger } from '../logger'
+import { claimKey, completeKey, releaseKey } from '../storage/idempotency'
 
 export type IdempotencyMode = 'off' | 'optional' | 'required'
 

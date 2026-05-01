@@ -21,7 +21,7 @@
  *     (5xx or thrown exception) so the client can retry cleanly.
  */
 import type { PoolClient } from 'pg'
-import { getPool } from './pool.js'
+import { getPool } from './pool'
 
 export type ClaimResult =
   | { kind: 'claimed' }

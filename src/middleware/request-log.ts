@@ -8,7 +8,7 @@
  * returns.
  */
 import type { MiddlewareHandler } from 'hono'
-import { logger } from '../logger.js'
+import { logger } from '../logger'
 
 export const requestLog: MiddlewareHandler = async (c, next) => {
   const start = performance.now()
