@@ -56,7 +56,7 @@ The minimum required for the server to start is `OPENFGA_DB_URL`.
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/stores` | Create a store. Idempotent. |
-| `POST` | `/stores/:storeId/authorization-models` | Write a new authorization model (immutable). Idempotent. |
+| `POST` | `/stores/:storeId/authorization-models` | Write a new authorization model (immutable). Idempotent. Accepts `application/json` (default) or `application/x-openfga-dsl` / `text/plain` (DSL — server-side compile). |
 | `GET`  | `/stores/:storeId/authorization-models` | List models, newest first. |
 | `GET`  | `/stores/:storeId/authorization-models/:id` | Read a specific model. |
 | `POST` | `/stores/:storeId/check` | Authorization check. |
@@ -67,6 +67,15 @@ The minimum required for the server to start is `OPENFGA_DB_URL`.
 
 "Idempotent" endpoints honor the `Idempotency-Key` HTTP header. See
 [Idempotency keys](#idempotency-keys) below.
+
+The write-model endpoint also accepts the OpenFGA DSL directly. Set
+`Content-Type: application/x-openfga-dsl` (or `text/plain`) and POST
+`.fga` bytes; the server compiles them via `@openfga/syntax-transformer`
+and produces the same `{ "authorization_model_id": "<id>" }` response
+as the JSON path. DSL parse errors return `400 invalid_argument` with
+line/column information. The JSON path is unchanged — `@openfga/sdk`
+clients work as before. See
+[`docs/features/dsl-write-model.md`](docs/features/dsl-write-model.md).
 
 Everything else (`expand`, `batch-check`, `list-users`, `assertions`,
 `changes`) returns `501 Not Implemented`.
