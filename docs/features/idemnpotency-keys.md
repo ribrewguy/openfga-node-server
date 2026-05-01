@@ -73,7 +73,7 @@ Idempotency middleware should run before route handlers for scoped mutating endp
 
 Idempotency requires persistent storage. In-memory storage is not acceptable for production because it does not survive process restarts and cannot coordinate horizontally scaled instances.
 
-The v1 backing store is the same Postgres database the OpenFGA tables live in. The idempotency table is created in the `openfga` schema as `openfga.idempotency_keys`. The migration that creates it lives in `migrations/` alongside the OpenFGA migration so a single `pnpm migrate` brings the database to a working state.
+The v1 backing store is the same Postgres database the OpenFGA tables live in. The idempotency table is created in the `openfga` schema as `openfga.idempotency_keys`. The migration that creates it lives in `migrations/` alongside the OpenFGA migration so a single `pnpm migrate up` brings the database to a working state.
 
 The `openfga` schema must remain a faithful subset of the upstream OpenFGA reference schema so `pg_dump --schema=openfga` produces a valid migration source. The idempotency table is not part of the OpenFGA-compatible state contract. To preserve the migration path, operators run `pg_dump --schema=openfga --exclude-table='openfga.idempotency_keys'` when cutting over to upstream OpenFGA. The PRD documents this recipe in §"Migration path FROM this server TO upstream OpenFGA" or in §"Idempotency keys".
 
