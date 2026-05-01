@@ -9,7 +9,7 @@
  */
 import { Pool } from 'pg'
 import type { PoolConfig } from 'pg'
-import { logger } from '../logger.js'
+import { logger } from '../logger'
 
 let _pool: Pool | null = null
 
