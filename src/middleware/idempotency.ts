@@ -186,12 +186,10 @@ export function idempotencyMiddleware(options: IdempotencyOptions): MiddlewareHa
     // claim.kind === 'claimed' — we own the slot. Run the handler,
     // capture the response, persist it for replay (or drop the slot
     // on 5xx so retries can succeed).
-    let handlerThrew = false
     try {
       await next()
     }
     catch (err) {
-      handlerThrew = true
       logger.warn({ err, ...keyLog }, 'idempotency_handler_threw')
       try {
         await releaseKey(key)
@@ -201,8 +199,6 @@ export function idempotencyMiddleware(options: IdempotencyOptions): MiddlewareHa
       }
       throw err
     }
-
-    if (handlerThrew) return
 
     const status = c.res.status
     if (status >= 500) {
