@@ -96,6 +96,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm migrate
+      - run: pnpm migrate up
 
       - run: pnpm test:integration
