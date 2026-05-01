@@ -38,9 +38,12 @@ import { readTuples, writeTuples, deleteTuples } from '../storage/tuples'
 import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { check } from '../evaluator/check'
 import { listObjects } from '../evaluator/list-objects'
+import { requestLog } from '../middleware/request-log'
 
 export function buildApp(): Hono {
   const app = new Hono()
+
+  app.use('*', requestLog)
 
   app.get('/health', (c) => c.json({ status: 'ok' }))
 

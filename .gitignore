@@ -6,6 +6,9 @@ dist
 .DS_Store
 coverage
 
+# Local-dev TLS certs (mkcert via `pnpm cert:create`)
+.certs/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

@@ -21,26 +21,33 @@ endpoints** below for the supported surface.
 ```sh
 pnpm install
 
-# Apply the schema migration to a Postgres of your choice. Any tool
-# that runs raw SQL works — psql, sqlx, supabase migration up, etc.
-psql "$OPENFGA_DB_URL" -f migrations/001_openfga_schema.sql
+# Configure environment. Copy the template and fill in OPENFGA_DB_URL.
+cp .env.example .env
+$EDITOR .env
+
+# (Optional) generate locally-trusted HTTPS certs via mkcert.
+# Prints the OPENFGA_TLS_* and NODE_EXTRA_CA_CERTS values to paste into .env.
+pnpm cert:create
+
+# Apply schema migrations.
+pnpm migrate up
 
 # Boot the server.
-OPENFGA_DB_URL=postgresql://... PORT=8080 pnpm dev
+pnpm dev
 
 # In another shell: load the example model.
-OPENFGA_API_URL=http://localhost:8080 pnpm load-model tests/fixtures/github.fga
+pnpm load-model tests/fixtures/github.fga
 # (Copy the printed OPENFGA_STORE_ID into your environment for subsequent calls.)
 ```
 
 ## Configuration
 
-| Env var | Required | Default | Purpose |
-|---|---|---|---|
-| `OPENFGA_DB_URL` | yes | — | Postgres DSN for the `openfga` schema. |
-| `PORT` | no | `8080` | HTTP port to listen on. |
-| `OPENFGA_API_URL` | CLI only | `http://localhost:8080` | Used by `load-model` to reach the running server. |
-| `OPENFGA_STORE_ID` | CLI only | — | If set, `load-model` writes the model into this store. If unset, a new store is created and the id is printed. |
+The full set of environment variables — required, optional, defaults,
+and tuning knobs for the connection pool — is documented inline in
+[`.env.example`](.env.example). Copy it to `.env` for local dev; the
+server loads it automatically via `dotenv/config`.
+
+The minimum required for the server to start is `OPENFGA_DB_URL`.
 
 ## Implemented endpoints
 
