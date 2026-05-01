@@ -85,6 +85,20 @@ RLS is enabled with no policies — direct queries from a non-service
 role are blocked at the database, on top of the application-level
 boundary discipline.
 
+### API caller authentication
+
+The server supports OpenFGA-aligned API caller authentication modes:
+
+- `none` — default for private-network deployments where the server is
+  protected by platform, service mesh, or reverse-proxy controls.
+- `shared_key` — bearer-token authentication for deployments that need
+  a simple static credential at the API boundary.
+- `oidc` — JWT/OIDC validation for deployments that need issuer,
+  audience, and key-set based verification.
+
+Authentication is enforced at the HTTP middleware boundary and must not
+change OpenFGA request or response shapes for authorized calls.
+
 ## Operational shape
 
 - Single Node process. No external service dependencies beyond
@@ -124,6 +138,3 @@ No application code changes. No SDK changes. No model changes.
 ## Out of scope
 
 - Hosted / managed offering of this server.
-- Authentication of API callers. The server trusts whatever can reach
-  it on the network. Deploy behind a reverse proxy or a service-mesh
-  ACL if you need caller auth.
