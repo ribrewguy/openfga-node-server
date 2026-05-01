@@ -35,13 +35,20 @@ import {
   writeAuthorizationModel,
 } from '../storage/authorization-models'
 import { getStore } from '../storage/stores'
-import { readTuples, writeTuples, deleteTuples } from '../storage/tuples'
+import {
+  DuplicateTupleError,
+  MissingTupleError,
+  applyTupleMutations,
+  readTuples,
+  type TupleConflictMode,
+} from '../storage/tuples'
 import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { check } from '../evaluator/check'
 import { listObjects } from '../evaluator/list-objects'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
 import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
+import { validateTupleKeyShape, validateWriteTupleKey } from './write-validation'
 
 /**
  * True when the Content-Type advertises an OpenFGA DSL body.
@@ -227,8 +234,53 @@ export function buildApp(): Hono {
     if (writes.length === 0 && deletes.length === 0) {
       return c.json({ code: 'invalid_argument', message: 'writes or deletes required' }, 400)
     }
-    if (writes.length > 0) await writeTuples(storeId, writes)
-    if (deletes.length > 0) await deleteTuples(storeId, deletes)
+
+    const onDuplicate = body?.writes?.on_duplicate ?? 'error'
+    const onMissing = body?.deletes?.on_missing ?? 'error'
+    if (onDuplicate !== 'error' && onDuplicate !== 'ignore') {
+      return c.json({ code: 'invalid_argument', message: 'writes.on_duplicate must be "error" or "ignore"' }, 400)
+    }
+    if (onMissing !== 'error' && onMissing !== 'ignore') {
+      return c.json({ code: 'invalid_argument', message: 'deletes.on_missing must be "error" or "ignore"' }, 400)
+    }
+
+    for (const tuple of writes) {
+      const invalid = validateTupleKeyShape(tuple)
+      if (invalid) return c.json({ code: 'invalid_argument', message: invalid }, 400)
+    }
+    for (const tuple of deletes) {
+      const invalid = validateTupleKeyShape(tuple)
+      if (invalid) return c.json({ code: 'invalid_argument', message: invalid }, 400)
+    }
+
+    const ctx = writes.length > 0 || body.authorization_model_id
+      ? await loadModelIndex(storeId, body.authorization_model_id)
+      : null
+    if ((writes.length > 0 || body.authorization_model_id) && !ctx) {
+      return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
+    }
+
+    if (ctx) {
+      for (const tuple of writes) {
+        const invalid = validateWriteTupleKey(ctx.index, tuple)
+        if (invalid) return c.json({ code: 'invalid_argument', message: invalid }, 400)
+      }
+    }
+
+    try {
+      await applyTupleMutations(storeId, {
+        writes,
+        deletes,
+        onDuplicate: onDuplicate as TupleConflictMode,
+        onMissing: onMissing as TupleConflictMode,
+      })
+    }
+    catch (err) {
+      if (err instanceof DuplicateTupleError || err instanceof MissingTupleError) {
+        return c.json({ code: 'conflict', message: err.message }, 409)
+      }
+      throw err
+    }
     return c.json({})
   })
 

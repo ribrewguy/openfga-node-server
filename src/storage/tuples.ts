@@ -49,40 +49,52 @@ export interface ReadFilter {
   pageSize?: number
 }
 
-export async function writeTuples(
-  storeId: string,
-  tuples: TupleKey[] | TupleKeyWithoutCondition[],
-): Promise<void> {
-  if (tuples.length === 0) return
-  const pool = getPool()
-  const values: string[] = []
-  const params: unknown[] = []
-  let p = 1
-  for (const t of tuples) {
-    const obj = parseObject(t.object)
-    values.push(`($${p++}, $${p++}, $${p++}, $${p++}, $${p++})`)
-    params.push(storeId, obj.type, obj.id, t.relation, t.user)
-  }
-  await pool.query(
-    `INSERT INTO openfga.tuple (store_id, object_type, object_id, relation, user_str)
-     VALUES ${values.join(',')}
-     ON CONFLICT DO NOTHING`,
-    params,
-  )
+export type TupleConflictMode = 'error' | 'ignore'
+
+export interface TupleMutations {
+  writes: TupleKey[] | TupleKeyWithoutCondition[]
+  deletes: TupleKeyWithoutCondition[] | TupleKey[]
+  onDuplicate: TupleConflictMode
+  onMissing: TupleConflictMode
 }
 
-export async function deleteTuples(
+export class DuplicateTupleError extends Error {
+  constructor(readonly tuple: TupleKey | TupleKeyWithoutCondition) {
+    super(`tuple already exists: ${tuple.user} ${tuple.relation} ${tuple.object}`)
+  }
+}
+
+export class MissingTupleError extends Error {
+  constructor(readonly tuple: TupleKey | TupleKeyWithoutCondition) {
+    super(`tuple does not exist: ${tuple.user} ${tuple.relation} ${tuple.object}`)
+  }
+}
+
+export async function applyTupleMutations(
   storeId: string,
-  tuples: TupleKeyWithoutCondition[] | TupleKey[],
+  mutations: TupleMutations,
 ): Promise<void> {
-  if (tuples.length === 0) return
   const pool = getPool()
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    for (const t of tuples) {
+
+    for (const t of mutations.writes) {
       const obj = parseObject(t.object)
-      await client.query(
+      const result = await client.query(
+        `INSERT INTO openfga.tuple (store_id, object_type, object_id, relation, user_str)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT DO NOTHING`,
+        [storeId, obj.type, obj.id, t.relation, t.user],
+      )
+      if (result.rowCount === 0 && mutations.onDuplicate === 'error') {
+        throw new DuplicateTupleError(t)
+      }
+    }
+
+    for (const t of mutations.deletes) {
+      const obj = parseObject(t.object)
+      const result = await client.query(
         `DELETE FROM openfga.tuple
           WHERE store_id = $1
             AND object_type = $2
@@ -91,7 +103,11 @@ export async function deleteTuples(
             AND user_str = $5`,
         [storeId, obj.type, obj.id, t.relation, t.user],
       )
+      if (result.rowCount === 0 && mutations.onMissing === 'error') {
+        throw new MissingTupleError(t)
+      }
     }
+
     await client.query('COMMIT')
   }
   catch (e) {
@@ -101,6 +117,32 @@ export async function deleteTuples(
   finally {
     client.release()
   }
+}
+
+export async function writeTuples(
+  storeId: string,
+  tuples: TupleKey[] | TupleKeyWithoutCondition[],
+): Promise<void> {
+  if (tuples.length === 0) return
+  await applyTupleMutations(storeId, {
+    writes: tuples,
+    deletes: [],
+    onDuplicate: 'ignore',
+    onMissing: 'ignore',
+  })
+}
+
+export async function deleteTuples(
+  storeId: string,
+  tuples: TupleKeyWithoutCondition[] | TupleKey[],
+): Promise<void> {
+  if (tuples.length === 0) return
+  await applyTupleMutations(storeId, {
+    writes: [],
+    deletes: tuples,
+    onDuplicate: 'ignore',
+    onMissing: 'ignore',
+  })
 }
 
 export async function readTuples(
