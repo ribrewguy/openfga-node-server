@@ -150,6 +150,29 @@ export const ReadBody = z.object({
   continuation_token: z.string().optional(),
 }).passthrough()
 
+// ─── PUT /stores/:storeId/assertions/:authorizationModelId ────────
+
+const ASSERTION_TUPLE_KEY = z.object({
+  user: z.string().min(1),
+  relation: z.string().min(1),
+  object: OBJECT_REF,
+}).passthrough()
+
+const ASSERTION = z.object({
+  tuple_key: ASSERTION_TUPLE_KEY,
+  expectation: z.boolean(),
+  contextual_tuples: z.array(TUPLE_KEY).optional(),
+  // OpenFGA's Assertion.context is typed as `object` (JSON-shaped
+  // data for ABAC condition evaluation). Zod's `record(string, unknown)`
+  // narrows to `Record<string, unknown>` which is assignable to that
+  // type without losing wire-compat passthrough.
+  context: z.record(z.string(), z.unknown()).optional(),
+}).passthrough()
+
+export const WriteAssertionsBody = z.object({
+  assertions: z.array(ASSERTION),
+}).passthrough()
+
 // ─── POST /stores/:storeId/list-users ─────────────────────────────
 
 const USER_TYPE_FILTER = z.object({
