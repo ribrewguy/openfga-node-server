@@ -132,6 +132,29 @@ export const ReadBody = z.object({
   continuation_token: z.string().optional(),
 }).passthrough()
 
+// ─── POST /stores/:storeId/list-users ─────────────────────────────
+
+const USER_TYPE_FILTER = z.object({
+  type: z.string().min(1),
+  relation: z.string().optional(),
+}).passthrough()
+
+export const ListUsersBody = z.object({
+  authorization_model_id: z.string().optional(),
+  object: z.object({
+    type: z.string().min(1),
+    id: z.string().min(1),
+  }).passthrough(),
+  relation: z.string().min(1),
+  // OpenFGA accepts exactly one user_filter — enforce that here so
+  // the evaluator never sees an ambiguous request.
+  user_filters: z.array(USER_TYPE_FILTER).length(1),
+  // Note: ListUsersRequest's contextual_tuples is a flat TupleKey[]
+  // (not wrapped in {tuple_keys: [...]}) — different from CheckRequest
+  // and ListObjectsRequest. Mirror the wire shape exactly.
+  contextual_tuples: z.array(TUPLE_KEY).optional(),
+}).passthrough()
+
 // ─── POST /stores/:storeId/expand ─────────────────────────────────
 
 export const ExpandBody = z.object({
