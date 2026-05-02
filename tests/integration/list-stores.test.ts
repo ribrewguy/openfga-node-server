@@ -62,18 +62,45 @@ describeIfDb('GET /stores', () => {
     return new Request(`http://localhost/stores${query}`)
   }
 
-  it('returns an OpenFGA-compatible envelope with empty token when there are no further pages', async () => {
+  it('returns an OpenFGA-compatible envelope with empty token on the terminal page', async () => {
     const app = buildApp()
     const tag = uniqueTag()
     await createStore(`${tag}-only`)
 
-    const res = await app.fetch(get('?page_size=10'))
-    expect(res.status).toBe(200)
-    const json = await res.json() as ListStoresResponse
-    expect(Array.isArray(json.stores)).toBe(true)
-    expect(typeof json.continuation_token).toBe('string')
-    const ours = json.stores.filter(s => s.name.startsWith(tag))
-    expect(ours.map(s => s.name)).toEqual([`${tag}-only`])
+    // Walk pages until the server signals "no further pages" (empty
+    // continuation_token). The first-page assertion in the older form
+    // of this test was flaky under vitest parallel test-file execution
+    // because sibling files insert stores into the same global ORDER BY
+    // space — sometimes pushing this test's freshly-created tag past a
+    // small page_size. Walking to the terminal page makes both load-
+    // bearing contracts (envelope shape + empty-token-terminal-page)
+    // observable without depending on any single-page ordering. A
+    // small page_size keeps the walk exercising pagination even when
+    // the DB is mostly empty. See openfga-ek6.
+    const PAGE_SIZE = 5
+    const seen: string[] = []
+    let token: string | undefined
+    let lastJson: ListStoresResponse | undefined
+    let safety = 500
+    while (safety > 0) {
+      const url = `?page_size=${PAGE_SIZE}${token ? `&continuation_token=${encodeURIComponent(token)}` : ''}`
+      const res = await app.fetch(get(url))
+      expect(res.status).toBe(200)
+      const json = await res.json() as ListStoresResponse
+      expect(Array.isArray(json.stores)).toBe(true)
+      expect(typeof json.continuation_token).toBe('string')
+      for (const s of json.stores) if (s.name.startsWith(tag)) seen.push(s.name)
+      lastJson = json
+      if (json.continuation_token === '') break
+      token = json.continuation_token
+      safety--
+    }
+
+    expect(safety).toBeGreaterThan(0)
+    // Terminal-page empty-token contract.
+    expect(lastJson?.continuation_token).toBe('')
+    // Freshly-created tagged store is reachable via the walk.
+    expect(seen).toEqual([`${tag}-only`])
   })
 
   it('returns multiple stores newest-first', async () => {
