@@ -132,6 +132,22 @@ export const ReadBody = z.object({
   continuation_token: z.string().optional(),
 }).passthrough()
 
+// ─── POST /stores/:storeId/expand ─────────────────────────────────
+
+export const ExpandBody = z.object({
+  tuple_key: z.object({
+    relation: z.string().min(1),
+    object: OBJECT_REF,
+  }).passthrough(),
+  authorization_model_id: z.string().optional(),
+  contextual_tuples: z
+    .object({
+      tuple_keys: z.array(TUPLE_KEY).optional(),
+    })
+    .passthrough()
+    .optional(),
+}).passthrough()
+
 // ─── POST /stores/:storeId/batch-check ────────────────────────────
 
 const CORRELATION_ID = z.string().regex(/^[A-Za-z0-9-]{1,36}$/, {
