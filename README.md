@@ -9,14 +9,16 @@ managed offerings (Auth0 FGA / openfga.cloud) aren't always the right
 shape. This server runs anywhere Node runs, talks the OpenFGA HTTP
 protocol byte-for-byte, and stores state in Postgres in a schema that
 mirrors the upstream's reference schema — so a future migration to the
-Go server is `pg_dump --schema=openfga` (with one excluded table for
-idempotency state, see [Idempotency keys](#idempotency-keys)) plus an
-env-var flip.
+Go server is `pg_dump --schema=openfga` (excluding three operational
+tables that aren't part of the OpenFGA reference contract; see
+[Migrating to upstream OpenFGA](#migrating-to-upstream-openfga))
+plus an env-var flip.
 
 ## Status
 
-Prototype. Not all OpenFGA endpoints are implemented. See **Implemented
-endpoints** below for the supported surface.
+Prototype. The full OpenFGA REST surface is implemented and SDK
+conformance tests pass against it (see openfga-68n).
+See **Implemented endpoints** below for the supported surface.
 
 ## Quick start
 
@@ -55,15 +57,22 @@ The minimum required for the server to start is `OPENFGA_DB_URL`.
 
 | Method | Path | Notes |
 |---|---|---|
+| `GET`  | `/stores` | List stores, newest first. Cursor-paginated via `continuation_token`. |
 | `POST` | `/stores` | Create a store. Idempotent. |
 | `POST` | `/stores/:storeId/authorization-models` | Write a new authorization model (immutable). Idempotent. Accepts `application/json` (default) or `application/x-openfga-dsl` / `text/plain` (DSL — server-side compile). |
 | `GET`  | `/stores/:storeId/authorization-models` | List models, newest first. |
 | `GET`  | `/stores/:storeId/authorization-models/:id` | Read a specific model. |
-| `POST` | `/stores/:storeId/check` | Authorization check. |
-| `POST` | `/stores/:storeId/write` | Write or delete tuples. Idempotent. |
-| `POST` | `/stores/:storeId/read` | Read tuples (filterable). |
-| `POST` | `/stores/:storeId/list-objects` | List objects of a type a user has a relation on. |
-| `GET`  | `/health` | Liveness check. |
+| `POST` | `/stores/:storeId/check` | Authorization check. Honors `contextual_tuples`. |
+| `POST` | `/stores/:storeId/write` | Write or delete tuples. Idempotent. Records changes transactionally for `/changes`. |
+| `POST` | `/stores/:storeId/read` | Read tuples (filterable). Cursor-paginated via `continuation_token`. |
+| `POST` | `/stores/:storeId/list-objects` | List objects of a type a user has a relation on. Honors `contextual_tuples`. |
+| `POST` | `/stores/:storeId/expand` | Returns the userset tree for a (object, relation). Honors `contextual_tuples`. |
+| `POST` | `/stores/:storeId/batch-check` | Up to 50 checks in one request, results keyed by `correlation_id`. Per-item `contextual_tuples`. |
+| `POST` | `/stores/:storeId/list-users` | List users with a relation on an object. Filter by user type/relation; userset memberships expanded. Honors `contextual_tuples`. |
+| `GET`  | `/stores/:storeId/changes` | Tuple changelog, oldest-first. Cursor-paginated; supports `?type=` filter and `?start_time=` cutoff. Polling-tail token semantics. |
+| `GET`  | `/stores/:storeId/assertions/:authorizationModelId` | Read assertion set for a model. |
+| `PUT`  | `/stores/:storeId/assertions/:authorizationModelId` | Upsert assertions for a model. |
+| `GET`  | `/health` | Liveness check (auth-exempt). |
 
 "Idempotent" endpoints honor the `Idempotency-Key` HTTP header. See
 [Idempotency keys](#idempotency-keys) below.
@@ -77,8 +86,10 @@ line/column information. The JSON path is unchanged — `@openfga/sdk`
 clients work as before. See
 [`docs/features/dsl-write-model.md`](docs/features/dsl-write-model.md).
 
-Everything else (`expand`, `batch-check`, `list-users`, `assertions`,
-`changes`) returns `501 Not Implemented`.
+All routes above are wire-compatible with `@openfga/sdk` — the
+SDK conformance suite in `tests/integration/sdk-conformance.test.ts`
+exercises every endpoint via the high-level `OpenFgaClient` over real
+HTTP and asserts no in-scope endpoint returns `501`.
 
 ## Evaluation algebra
 
@@ -94,9 +105,14 @@ The check evaluator implements the full OpenFGA rewrite-rule set:
 candidates through `check()` so `intersection` and `difference`
 correctness is preserved.
 
-26 unit tests in `tests/unit/` cover every rewrite type. 2 integration
-tests in `tests/integration/` (run when `OPENFGA_DB_URL` is reachable)
-prove tuples persist across pool resets.
+Unit tests in `tests/unit/` cover every rewrite type for `check`,
+`list-objects`, `expand`, and `list-users` — including userset
+expansion, contextual-tuple overlays, and cycle detection.
+Integration tests in `tests/integration/` (run when `OPENFGA_DB_URL`
+is reachable) cover persistence, transactional changelog, cursor
+pagination, store-existence guards, idempotency cross-store
+isolation, and end-to-end `@openfga/sdk` conformance against a
+live HTTP listener.
 
 ## Idempotency keys
 
@@ -124,16 +140,41 @@ Replay semantics, within `OPENFGA_IDEMPOTENCY_TTL_MS` (default 24 h):
 | Idempotency store unavailable | `503 idempotency_store_unavailable`. |
 
 Idempotency state lives in `openfga.idempotency_keys`. It is **not**
-part of the OpenFGA-compatible state contract. When migrating to the
-upstream OpenFGA Go server, exclude this table from the dump:
-
-```sh
-pg_dump --schema=openfga \
-        --exclude-table='openfga.idempotency_keys'
-```
+part of the OpenFGA-compatible state contract — see
+[Migrating to upstream OpenFGA](#migrating-to-upstream-openfga) for
+the full exclude list.
 
 See [`docs/features/idemnpotency-keys.md`](docs/features/idemnpotency-keys.md)
 for the full specification.
+
+## Migrating to upstream OpenFGA
+
+The `openfga` schema mirrors the upstream OpenFGA reference schema for
+the tables that ARE part of the wire contract (`store`,
+`authorization_model`, `tuple`). Three additional tables back this
+server's operational features and are NOT part of the reference
+contract:
+
+| Table | Backs |
+|---|---|
+| `openfga.idempotency_keys` | `Idempotency-Key` HTTP header (see [Idempotency keys](#idempotency-keys)) |
+| `openfga.tuple_change` | `GET /stores/:storeId/changes` changelog with deterministic per-insertion ordering |
+| `openfga.assertions` | `GET/PUT /stores/:storeId/assertions/:authorizationModelId` |
+
+When migrating to the upstream OpenFGA Go server, exclude all three
+tables from the dump:
+
+```sh
+pg_dump --schema=openfga \
+        --exclude-table='openfga.idempotency_keys' \
+        --exclude-table='openfga.tuple_change' \
+        --exclude-table='openfga.assertions'
+```
+
+The migration files for each operational table document the same
+recipe inline — see `migrations/1777824000000_idempotency-keys.sql`,
+`migrations/1777910400000_tuple-changes.sql`, and
+`migrations/1777996800000_assertions.sql`.
 
 ## Status: tradeoffs of the current implementation
 
