@@ -281,17 +281,37 @@ describe('idempotency middleware — fingerprint stability', () => {
     expect(fpA).toBe(fpB)
   })
 
-  it('two different store ids on the same route share the same matched-path component', async () => {
+  // Regression for openfga-fot: prior implementation hashed the
+  // matched route pattern (`/stores/:storeId/write`) instead of the
+  // concrete request path, so the SAME Idempotency-Key + same body
+  // across two stores collided on the same fingerprint and replayed
+  // store A's response under store B's namespace. This test sends
+  // the production failure scenario: same key, same body, two
+  // different concrete storeId path components, and asserts the
+  // fingerprints differ so the storage layer can never confuse them.
+  it('same Idempotency-Key + same body across two stores produces different fingerprints (no cross-store replay)', async () => {
     claimKey.mockResolvedValue({ kind: 'claimed' })
     completeKey.mockResolvedValue(undefined)
 
     const app = buildApp({ mode: 'optional' })
-    await app.fetch(reqJson('/stores/a/write', { writes: [] }, { 'Idempotency-Key': 'k1' }))
-    await app.fetch(reqJson('/stores/b/write', { writes: [] }, { 'Idempotency-Key': 'k2' }))
+    const SHARED_KEY = 'shared-cross-store-key'
+    await app.fetch(reqJson('/stores/storeA/write', { name: 'same' }, { 'Idempotency-Key': SHARED_KEY }))
+    await app.fetch(reqJson('/stores/storeB/write', { name: 'same' }, { 'Idempotency-Key': SHARED_KEY }))
 
-    // Same scope, same body → same fingerprint, even though storeId differs.
+    // Both calls reached the storage layer with the SAME key string —
+    // confirms the test setup matches the production scenario.
+    const keyA = claimKey.mock.calls[0]![0]
+    const keyB = claimKey.mock.calls[1]![0]
+    expect(keyA).toBe(SHARED_KEY)
+    expect(keyB).toBe(SHARED_KEY)
+
+    // The load-bearing assertion: identical key + body must produce
+    // different fingerprints when the concrete storeId differs, so
+    // the storage layer treats the second call as a fresh claim or
+    // as a fingerprint-mismatch — never as a replay of store A.
     const fpA = claimKey.mock.calls[0]![1]
     const fpB = claimKey.mock.calls[1]![1]
-    expect(fpA).toBe(fpB)
+    expect(fpA).not.toBe(fpB)
   })
+
 })
