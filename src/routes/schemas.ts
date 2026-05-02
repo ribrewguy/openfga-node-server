@@ -173,7 +173,10 @@ export const WriteBody = z
 
 export const ReadBody = z.object({
   tuple_key: TUPLE_KEY_FILTER.optional(),
-  page_size: z.number().int().nonnegative().optional(),
+  // Reject 0: a page of zero rows is meaningless on the wire and
+  // would otherwise reach readTuplesPage's slice logic which assumes
+  // page.length >= 1 when rows exist. See openfga-5uv review.
+  page_size: z.number().int().positive().optional(),
   continuation_token: z.string().optional(),
 }).passthrough()
 
