@@ -107,10 +107,12 @@ describe('write route', () => {
     }))
 
     expect(res.status).toBe(400)
-    expect(await res.json()).toEqual({
-      code: 'invalid_argument',
-      message: 'invalid object reference "missing-colon"',
-    })
+    // The Zod validator rejects malformed object refs at the request
+    // boundary before storage. The exact error text is implementation
+    // detail; the public contract is the OpenFGA invalid_argument
+    // envelope plus the guarantee that storage was not invoked.
+    const body = await res.json() as { code: string }
+    expect(body.code).toBe('invalid_argument')
     expect(applyTupleMutations).not.toHaveBeenCalled()
   })
 

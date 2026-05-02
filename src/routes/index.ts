@@ -26,7 +26,7 @@
  * snake_cases everything, so the bodies and responses here do too.
  */
 import { Hono } from 'hono'
-import type { CheckRequest, ListObjectsRequest, ReadRequest, WriteRequest, AuthorizationModel } from '@openfga/sdk'
+import type { AuthorizationModel } from '@openfga/sdk'
 import { transformer, errors as transformerErrors } from '@openfga/syntax-transformer'
 import { createStore } from '../storage/stores'
 import {
@@ -49,7 +49,17 @@ import { listObjects } from '../evaluator/list-objects'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
 import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
-import { validateTupleKeyShape, validateWriteTupleKey } from './write-validation'
+import { validate } from '../middleware/validation'
+import {
+  CheckBody,
+  CreateStoreBody,
+  ListObjectsBody,
+  PageSizeQuery,
+  ReadBody,
+  WriteAuthorizationModelBody,
+  WriteBody,
+} from './schemas'
+import { validateWriteTupleKey } from './write-validation'
 
 /**
  * True when the Content-Type advertises an OpenFGA DSL body.
@@ -125,11 +135,9 @@ export function buildApp(): Hono {
   app.get('/health', (c) => c.json({ status: 'ok' }))
 
   // ─── Stores ─────────────────────────────────────────────────────
-  app.post('/stores', async (c) => {
-    const body = await c.req.json<{ name?: string }>().catch(() => ({} as { name?: string }))
-    const name = body?.name?.trim()
-    if (!name) return c.json({ code: 'invalid_argument', message: 'name is required' }, 400)
-    const row = await createStore(name)
+  app.post('/stores', validate('json', CreateStoreBody), async (c) => {
+    const body = c.req.valid('json')
+    const row = await createStore(body.name.trim())
     return c.json({
       id: row.id,
       name: row.name,
@@ -165,7 +173,12 @@ export function buildApp(): Hono {
       }
     }
     else {
-      model = await c.req.json<Partial<AuthorizationModel>>().catch(() => ({} as Partial<AuthorizationModel>))
+      const raw = await c.req.json().catch(() => ({}))
+      const parsed = WriteAuthorizationModelBody.safeParse(raw)
+      if (!parsed.success) {
+        return c.json({ code: 'invalid_argument', message: 'request validation failed' }, 400)
+      }
+      model = parsed.data as Partial<AuthorizationModel>
     }
 
     if (!Array.isArray(model.type_definitions)) {
@@ -179,12 +192,13 @@ export function buildApp(): Hono {
     return c.json({ authorization_model_id: row.id })
   })
 
-  app.get('/stores/:storeId/authorization-models', async (c) => {
+  app.get('/stores/:storeId/authorization-models', validate('query', PageSizeQuery), async (c) => {
     const storeId = c.req.param('storeId')
     const store = await getStore(storeId)
     if (!store) return c.json({ code: 'not_found', message: 'store not found' }, 404)
 
-    const pageSize = Math.min(Number(c.req.query('page_size') ?? 50), 100)
+    const { page_size } = c.req.valid('query')
+    const pageSize = Math.min(page_size ?? 50, 100)
     const rows = await listAuthorizationModels(storeId, pageSize)
     return c.json({
       authorization_models: rows.map(r => ({
@@ -213,13 +227,10 @@ export function buildApp(): Hono {
   })
 
   // ─── Check ──────────────────────────────────────────────────────
-  app.post('/stores/:storeId/check', async (c) => {
+  app.post('/stores/:storeId/check', validate('json', CheckBody), async (c) => {
     const storeId = c.req.param('storeId')
-    const body = await c.req.json<CheckRequest>().catch(() => ({} as CheckRequest))
-    const tk = body?.tuple_key
-    if (!tk?.user || !tk.relation || !tk.object) {
-      return c.json({ code: 'invalid_argument', message: 'tuple_key.user, .relation, .object required' }, 400)
-    }
+    const body = c.req.valid('json')
+    const tk = body.tuple_key
     const ctx = await loadModelIndex(storeId, body.authorization_model_id)
     if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
     const allowed = await check(ctx.index, pgTupleStore(storeId), tk.user, tk.relation, tk.object)
@@ -227,32 +238,14 @@ export function buildApp(): Hono {
   })
 
   // ─── Write ──────────────────────────────────────────────────────
-  app.post('/stores/:storeId/write', async (c) => {
+  app.post('/stores/:storeId/write', validate('json', WriteBody), async (c) => {
     const storeId = c.req.param('storeId')
-    const body = await c.req.json<WriteRequest>().catch(() => ({} as WriteRequest))
-    const writes = body?.writes?.tuple_keys ?? []
-    const deletes = body?.deletes?.tuple_keys ?? []
-    if (writes.length === 0 && deletes.length === 0) {
-      return c.json({ code: 'invalid_argument', message: 'writes or deletes required' }, 400)
-    }
+    const body = c.req.valid('json')
+    const writes = body.writes?.tuple_keys ?? []
+    const deletes = body.deletes?.tuple_keys ?? []
 
-    const onDuplicate = body?.writes?.on_duplicate ?? 'error'
-    const onMissing = body?.deletes?.on_missing ?? 'error'
-    if (onDuplicate !== 'error' && onDuplicate !== 'ignore') {
-      return c.json({ code: 'invalid_argument', message: 'writes.on_duplicate must be "error" or "ignore"' }, 400)
-    }
-    if (onMissing !== 'error' && onMissing !== 'ignore') {
-      return c.json({ code: 'invalid_argument', message: 'deletes.on_missing must be "error" or "ignore"' }, 400)
-    }
-
-    for (const tuple of writes) {
-      const invalid = validateTupleKeyShape(tuple)
-      if (invalid) return c.json({ code: 'invalid_argument', message: invalid }, 400)
-    }
-    for (const tuple of deletes) {
-      const invalid = validateTupleKeyShape(tuple)
-      if (invalid) return c.json({ code: 'invalid_argument', message: invalid }, 400)
-    }
+    const onDuplicate = body.writes?.on_duplicate ?? 'error'
+    const onMissing = body.deletes?.on_missing ?? 'error'
 
     const ctx = writes.length > 0 || body.authorization_model_id
       ? await loadModelIndex(storeId, body.authorization_model_id)
@@ -286,17 +279,17 @@ export function buildApp(): Hono {
   })
 
   // ─── Read ───────────────────────────────────────────────────────
-  app.post('/stores/:storeId/read', async (c) => {
+  app.post('/stores/:storeId/read', validate('json', ReadBody), async (c) => {
     const storeId = c.req.param('storeId')
-    const body = await c.req.json<ReadRequest>().catch(() => ({} as ReadRequest))
-    const tk = body?.tuple_key
+    const body = c.req.valid('json')
+    const tk = body.tuple_key
     let rows
     try {
       rows = await readTuples(storeId, {
         object: tk?.object,
         relation: tk?.relation,
         user: tk?.user,
-        pageSize: body?.page_size,
+        pageSize: body.page_size,
       })
     }
     catch (err) {
@@ -319,12 +312,9 @@ export function buildApp(): Hono {
   })
 
   // ─── List objects ───────────────────────────────────────────────
-  app.post('/stores/:storeId/list-objects', async (c) => {
+  app.post('/stores/:storeId/list-objects', validate('json', ListObjectsBody), async (c) => {
     const storeId = c.req.param('storeId')
-    const body = await c.req.json<ListObjectsRequest>().catch(() => ({} as ListObjectsRequest))
-    if (!body?.type || !body.relation || !body.user) {
-      return c.json({ code: 'invalid_argument', message: 'type, relation, user required' }, 400)
-    }
+    const body = c.req.valid('json')
     const ctx = await loadModelIndex(storeId, body.authorization_model_id)
     if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
     const ids = await listObjects(ctx.index, pgTupleStore(storeId), body.user, body.relation, body.type)
