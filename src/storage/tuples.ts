@@ -30,10 +30,17 @@ export interface ObjectRef {
   id: string
 }
 
+export class InvalidObjectReferenceError extends Error {
+  constructor(public readonly value: string) {
+    super(`invalid object reference (expected "type:id" or "type:" for type-only filters): "${value}"`)
+    this.name = 'InvalidObjectReferenceError'
+  }
+}
+
 export function parseObject(s: string): ObjectRef {
   const idx = s.indexOf(':')
   if (idx < 0) {
-    throw new Error(`Invalid object reference (expected "type:id"): ${s}`)
+    throw new InvalidObjectReferenceError(s)
   }
   return { type: s.slice(0, idx), id: s.slice(idx + 1) }
 }
@@ -158,8 +165,15 @@ export async function readTuples(
     const obj = parseObject(filter.object)
     where.push(`object_type = $${p++}`)
     params.push(obj.type)
-    where.push(`object_id = $${p++}`)
-    params.push(obj.id)
+    // OpenFGA wire format admits type-only filters of the form
+    // "type:" — distinguish those from full references "type:id" and
+    // skip the object_id predicate so the query returns every tuple
+    // for the requested type. Adding `object_id = ''` would silently
+    // return zero rows.
+    if (obj.id !== '') {
+      where.push(`object_id = $${p++}`)
+      params.push(obj.id)
+    }
   }
   else if (filter.objectType) {
     where.push(`object_type = $${p++}`)
