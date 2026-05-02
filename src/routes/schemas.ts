@@ -61,6 +61,17 @@ export const PageSizeQuery = z.object({
     .transform((v) => (v === undefined ? undefined : Number(v))),
 }).passthrough()
 
+export const ListStoresQuery = z.object({
+  page_size: z
+    .string()
+    .optional()
+    .refine((v) => v === undefined || /^\d+$/.test(v), {
+      message: 'page_size must be a non-negative integer',
+    })
+    .transform((v) => (v === undefined ? undefined : Number(v))),
+  continuation_token: z.string().optional(),
+}).passthrough()
+
 // ─── POST /stores ─────────────────────────────────────────────────
 
 export const CreateStoreBody = z.object({

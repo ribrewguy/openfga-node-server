@@ -61,3 +61,44 @@ export async function listStores(): Promise<StoreRow[]> {
   )
   return rows
 }
+
+export interface ListStoresPage {
+  rows: StoreRow[]
+  /**
+   * Cursor for the next page. `null` when there are no more rows.
+   * The cursor is the (created_at, id) of the last row this page
+   * returned; a follow-up call with this cursor returns rows strictly
+   * older than it under the DESC ordering.
+   */
+  nextCursor: { created_at: string, id: string } | null
+}
+
+/**
+ * Newest-first paginated listing of non-deleted stores. Pagination is
+ * cursor-based on (created_at, id) so a row inserted at the head of
+ * the table while a client is paging does not shift previously-seen
+ * pages. The +1 fetch trick lets us decide "is there a next page"
+ * without a separate COUNT query.
+ */
+export async function listStoresPage(
+  pageSize: number,
+  cursor: { created_at: string, id: string } | null,
+): Promise<ListStoresPage> {
+  const pool = getPool()
+  const { rows } = await pool.query<StoreRow>(
+    `SELECT id, name, created_at, updated_at, deleted_at
+       FROM openfga.store
+      WHERE deleted_at IS NULL
+        AND ($1::timestamptz IS NULL
+             OR (created_at, id) < ($1::timestamptz, $2::text))
+      ORDER BY created_at DESC, id DESC
+      LIMIT $3`,
+    [cursor?.created_at ?? null, cursor?.id ?? null, pageSize + 1],
+  )
+  if (rows.length <= pageSize) {
+    return { rows, nextCursor: null }
+  }
+  const page = rows.slice(0, pageSize)
+  const last = page[page.length - 1]!
+  return { rows: page, nextCursor: { created_at: last.created_at, id: last.id } }
+}
