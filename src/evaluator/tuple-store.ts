@@ -30,6 +30,50 @@ export interface TupleStore {
 }
 
 /**
+ * Combine two TupleStores into one whose query methods return the
+ * union (deduplicated) of both. Order is base first, overlay second
+ * so the overlay's listings append uniquely.
+ *
+ * Used to fold OpenFGA `contextual_tuples` from a single check or
+ * list-objects request into the evaluator's view without persisting
+ * them — the caller wraps `pgTupleStore` with the contextual overlay
+ * for the duration of the request and discards the wrapper after.
+ */
+export function unionTupleStore(base: TupleStore, overlay: TupleStore): TupleStore {
+  return {
+    async listUsersForRelation(objectType, objectId, relation) {
+      const [a, b] = await Promise.all([
+        base.listUsersForRelation(objectType, objectId, relation),
+        overlay.listUsersForRelation(objectType, objectId, relation),
+      ])
+      return [...new Set([...a, ...b])]
+    },
+    async listObjectIdsForUser(objectType, relation, userStr) {
+      const [a, b] = await Promise.all([
+        base.listObjectIdsForUser(objectType, relation, userStr),
+        overlay.listObjectIdsForUser(objectType, relation, userStr),
+      ])
+      return [...new Set([...a, ...b])]
+    },
+    async listAllForRelation(objectType, relation) {
+      const [a, b] = await Promise.all([
+        base.listAllForRelation(objectType, relation),
+        overlay.listAllForRelation(objectType, relation),
+      ])
+      const seen = new Set<string>()
+      const out: Array<{ object_id: string, user_str: string }> = []
+      for (const item of [...a, ...b]) {
+        const key = `${item.object_id}\0${item.user_str}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push(item)
+      }
+      return out
+    },
+  }
+}
+
+/**
  * In-memory implementation. Test-only. Production code uses the
  * pg-backed implementation in `../storage/tuples.ts`.
  */

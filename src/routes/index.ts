@@ -46,6 +46,8 @@ import {
 import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { check } from '../evaluator/check'
 import { listObjects } from '../evaluator/list-objects'
+import { InMemoryTupleStore, unionTupleStore } from '../evaluator/tuple-store'
+import type { TupleStore } from '../evaluator/tuple-store'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
 import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
@@ -73,6 +75,28 @@ function isDslContentType(header: string | undefined): boolean {
   if (!header) return false
   const type = header.split(';', 1)[0]!.trim().toLowerCase()
   return type === 'application/x-openfga-dsl' || type === 'text/plain'
+}
+
+/**
+ * Build a request-scoped TupleStore overlay that holds OpenFGA
+ * `contextual_tuples` for the duration of one check or list-objects
+ * call. Returns the base store unchanged when no contextual tuples
+ * are present so the hot path stays a single Postgres-backed store.
+ *
+ * Contextual tuples are never persisted — the overlay is discarded
+ * once the response is sent, and `add()` only mutates in-memory
+ * state on the InMemoryTupleStore instance.
+ */
+function withContextualTuples(
+  base: TupleStore,
+  contextual: ReadonlyArray<{ user: string, relation: string, object: string }> | undefined,
+): TupleStore {
+  if (!contextual || contextual.length === 0) return base
+  const overlay = new InMemoryTupleStore()
+  for (const t of contextual) {
+    overlay.add(t.object, t.relation, t.user)
+  }
+  return unionTupleStore(base, overlay)
 }
 
 /**
@@ -233,7 +257,8 @@ export function buildApp(): Hono {
     const tk = body.tuple_key
     const ctx = await loadModelIndex(storeId, body.authorization_model_id)
     if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
-    const allowed = await check(ctx.index, pgTupleStore(storeId), tk.user, tk.relation, tk.object)
+    const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples?.tuple_keys)
+    const allowed = await check(ctx.index, store, tk.user, tk.relation, tk.object)
     return c.json({ allowed })
   })
 
@@ -317,7 +342,8 @@ export function buildApp(): Hono {
     const body = c.req.valid('json')
     const ctx = await loadModelIndex(storeId, body.authorization_model_id)
     if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
-    const ids = await listObjects(ctx.index, pgTupleStore(storeId), body.user, body.relation, body.type)
+    const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples?.tuple_keys)
+    const ids = await listObjects(ctx.index, store, body.user, body.relation, body.type)
     return c.json({ objects: ids.map(id => `${body.type}:${id}`) })
   })
 
