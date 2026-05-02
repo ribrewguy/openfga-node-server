@@ -87,6 +87,137 @@ describe('listUsers — direct grants and shape discrimination', () => {
   })
 })
 
+// Regression for openfga-6e6: when a tuple grants access via a
+// userset reference (e.g. `group:eng#member`) and the request's
+// user_filter targets the underlying user type, the server must
+// expand the userset to its concrete users. The previous
+// implementation only emitted the userset shape and filtered it
+// out for `{type: 'user'}` requests, returning [] instead of the
+// actual members.
+describe('listUsers — userset expansion under user_filter', () => {
+  const usersetGrantModel: AuthorizationModel = {
+    id: 'userset-grant',
+    schema_version: '1.1',
+    type_definitions: [
+      { type: 'user' },
+      {
+        type: 'group',
+        relations: { member: { this: {} } },
+        metadata: {
+          relations: {
+            member: {
+              directly_related_user_types: [{ type: 'user' }, { type: 'group', relation: 'member' }],
+            },
+          },
+        },
+      },
+      {
+        type: 'doc',
+        relations: { viewer: { this: {} } },
+        metadata: {
+          relations: {
+            viewer: {
+              directly_related_user_types: [
+                { type: 'user' },
+                { type: 'group', relation: 'member' },
+              ],
+            },
+          },
+        },
+      },
+    ],
+  }
+
+  it("expands a single userset to its concrete users for a user-typed filter", async () => {
+    const store = new InMemoryTupleStore()
+    store.add('doc:1', 'viewer', 'group:eng#member')
+    store.add('group:eng', 'member', 'user:alice')
+    store.add('group:eng', 'member', 'user:bob')
+
+    const users = await listUsers(modelIndex(usersetGrantModel), store, 'doc', '1', 'viewer', { type: 'user' })
+    const ids = users?.map((u) => u.object?.id).sort()
+    expect(ids).toEqual(['alice', 'bob'])
+  })
+
+  it("preserves the userset shape when user_filter targets the userset type", async () => {
+    const store = new InMemoryTupleStore()
+    store.add('doc:1', 'viewer', 'group:eng#member')
+    store.add('group:eng', 'member', 'user:alice')
+
+    // Request the userset shape — must NOT be subsumed by the
+    // expansion. The result includes group:eng#member; the
+    // expanded user:alice is filtered out by the type='group' filter.
+    const users = await listUsers(
+      modelIndex(usersetGrantModel),
+      store,
+      'doc',
+      '1',
+      'viewer',
+      { type: 'group', relation: 'member' },
+    )
+    expect(users).toEqual([{ userset: { type: 'group', id: 'eng', relation: 'member' } }])
+  })
+
+  it("expands nested usersets recursively (group of groups)", async () => {
+    const store = new InMemoryTupleStore()
+    // doc:1 viewer ← group:a#member
+    store.add('doc:1', 'viewer', 'group:a#member')
+    // group:a member ← group:b#member  (group b is a member of a)
+    store.add('group:a', 'member', 'group:b#member')
+    // group:b member ← user:carol
+    store.add('group:b', 'member', 'user:carol')
+
+    const users = await listUsers(
+      modelIndex(usersetGrantModel),
+      store,
+      'doc',
+      '1',
+      'viewer',
+      { type: 'user' },
+    )
+    expect(users).toEqual([{ object: { type: 'user', id: 'carol' } }])
+  })
+
+  it("dedupes a user reachable via multiple userset paths", async () => {
+    const store = new InMemoryTupleStore()
+    store.add('doc:1', 'viewer', 'group:a#member')
+    store.add('doc:1', 'viewer', 'group:b#member')
+    store.add('group:a', 'member', 'user:alice')
+    store.add('group:b', 'member', 'user:alice')
+
+    const users = await listUsers(
+      modelIndex(usersetGrantModel),
+      store,
+      'doc',
+      '1',
+      'viewer',
+      { type: 'user' },
+    )
+    expect(users).toEqual([{ object: { type: 'user', id: 'alice' } }])
+  })
+
+  it("does not infinite-loop on a userset cycle", async () => {
+    const store = new InMemoryTupleStore()
+    store.add('doc:1', 'viewer', 'group:a#member')
+    // Cycle: group:a member ← group:b#member, group:b member ← group:a#member
+    store.add('group:a', 'member', 'group:b#member')
+    store.add('group:b', 'member', 'group:a#member')
+    // No concrete users in the cycle — but adding one should still
+    // surface it without the recursion exploding.
+    store.add('group:a', 'member', 'user:dana')
+
+    const users = await listUsers(
+      modelIndex(usersetGrantModel),
+      store,
+      'doc',
+      '1',
+      'viewer',
+      { type: 'user' },
+    )
+    expect(users).toEqual([{ object: { type: 'user', id: 'dana' } }])
+  })
+})
+
 describe('listUsers — rewrite algebra', () => {
   it('returns the union of children (set union, deduped)', async () => {
     const model = modelIndex({

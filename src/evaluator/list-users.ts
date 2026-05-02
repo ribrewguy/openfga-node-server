@@ -7,7 +7,13 @@
  * wildcard) and filter by the request's `user_filter`.
  *
  * Algorithm per rewrite type:
- *   - `this`              listUsersForRelation(...) — direct grants
+ *   - `this`              listUsersForRelation(...) — direct grants;
+ *                         additionally expands any userset references
+ *                         (`<type>:<id>#<relation>`) by recursing into
+ *                         that userset's own users, so a request
+ *                         filtered by the underlying user type
+ *                         surfaces concrete users reached through
+ *                         group memberships. See openfga-6e6.
  *   - `computedUserset`   recurse into the computed relation
  *   - `tupleToUserset`    listUsersForRelation(tupleset) for parent
  *                         refs, then recurse into `computedUserset`
@@ -55,7 +61,45 @@ async function gather(
   // recursions.
   if (rewrite.this !== undefined) {
     const users = await store.listUsersForRelation(objectType, objectId, relation)
-    return new Set(users)
+    const out = new Set<string>()
+    for (const u of users) {
+      // Always include the raw user_str so userset and wildcard
+      // filters (e.g. user_filters: [{type: 'group', relation:
+      // 'member'}]) still find their match shapes.
+      out.add(u)
+      // OpenFGA ListUsers expands userset references when the
+      // requested filter targets the underlying user type. So for
+      // a tuple like (doc:1, viewer, group:eng#member), a request
+      // with user_filters: [{type: 'user'}] should return the
+      // concrete users members of group:eng — not nothing. Recurse
+      // into the referenced (type, id, relation) and merge its
+      // users into the gather set; matchesFilter at the call site
+      // picks the right shape based on the filter. See openfga-6e6.
+      const hashIdx = u.indexOf('#')
+      if (hashIdx > 0) {
+        const left = u.slice(0, hashIdx)
+        const usRelation = u.slice(hashIdx + 1)
+        const colonIdx = left.indexOf(':')
+        if (colonIdx > 0) {
+          const usType = left.slice(0, colonIdx)
+          const usId = left.slice(colonIdx + 1)
+          // Skip if the referenced object is itself a wildcard
+          // (`group:*#member` is unusual but defensively guarded).
+          if (usId !== '*' && usId.length > 0) {
+            const expanded = await gatherForRelation(
+              model,
+              store,
+              usType,
+              usId,
+              usRelation,
+              visited,
+            )
+            for (const e of expanded) out.add(e)
+          }
+        }
+      }
+    }
+    return out
   }
 
   if (rewrite.computedUserset?.relation) {
