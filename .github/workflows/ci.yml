@@ -60,8 +60,8 @@ jobs:
 
       - run: pnpm test:unit
 
-  test-integration:
-    name: Integration tests
+  test-coverage:
+    name: Tests + coverage
     runs-on: ubuntu-latest
 
     services:
@@ -98,4 +98,16 @@ jobs:
 
       - run: pnpm migrate up
 
-      - run: pnpm test:integration
+      # Runs both unit and integration projects under coverage and
+      # enforces the floors configured in vitest.config.ts. Replaces
+      # the standalone integration job — Postgres is already available
+      # so re-running the full suite here costs nothing extra.
+      - run: pnpm coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage/
+          retention-days: 14
