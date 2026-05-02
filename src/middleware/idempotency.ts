@@ -110,8 +110,15 @@ function findScope(scopes: IdempotencyScope[], method: string, path: string): Id
   return null
 }
 
-function fingerprint(method: string, routePattern: string, rawBody: string): string {
-  return createHash('sha256').update(`${method} ${routePattern}\n${rawBody}`).digest('hex')
+function fingerprint(method: string, requestPath: string, rawBody: string): string {
+  // The path component MUST be the concrete request URL (e.g.
+  // `/stores/01ABC.../write`), not the matched route pattern
+  // (`/stores/:storeId/write`). Hashing the pattern collapses every
+  // store onto the same fingerprint, so the same Idempotency-Key
+  // reused across two stores with the same body would replay the
+  // first store's response under the second store's namespace —
+  // a cross-store data leak. See openfga-fot.
+  return createHash('sha256').update(`${method} ${requestPath}\n${rawBody}`).digest('hex')
 }
 
 function keyHash(key: string): string {
@@ -155,7 +162,7 @@ export function idempotencyMiddleware(options: IdempotencyOptions): MiddlewareHa
       return c.json(ERROR_ENVELOPES.unavailable, 503)
     }
 
-    const fp = fingerprint(scope.method, scope.path, rawBody)
+    const fp = fingerprint(scope.method, c.req.path, rawBody)
     const keyLog = { key_hash: keyHash(key), method: scope.method, route: scope.path }
 
     let claim
