@@ -100,38 +100,45 @@ describeIfDb('GET /stores', () => {
       created.push(row.name)
     }
 
+    // Vitest may run integration test files in parallel against the same DB,
+    // so other tests interleave inserts in the global ORDER BY space. The
+    // cursor walk still yields our tag rows newest-first; we just stop as
+    // soon as we've collected all of them rather than walking the entire DB.
     const seen: string[] = []
     let token: string | undefined
-    let safety = 50
-    do {
-      const url = `?page_size=2${token ? `&continuation_token=${encodeURIComponent(token)}` : ''}`
+    let safety = 200
+    while (seen.length < created.length && safety > 0) {
+      const url = `?page_size=10${token ? `&continuation_token=${encodeURIComponent(token)}` : ''}`
       const res = await app.fetch(get(url))
       expect(res.status).toBe(200)
       const json = await res.json() as ListStoresResponse
       for (const s of json.stores) {
         if (s.name.startsWith(tag)) seen.push(s.name)
       }
-      token = json.continuation_token === '' ? undefined : json.continuation_token
+      if (json.continuation_token === '') break
+      token = json.continuation_token
       safety--
-    } while (token !== undefined && safety > 0)
-    expect(safety).toBeGreaterThan(0)
+    }
 
-    // Newest-first across the entire walk; no duplicates, no drops.
+    expect(safety).toBeGreaterThan(0)
+    // Newest-first across the walk; no duplicates, no drops.
     expect(seen).toEqual([...created].reverse())
     expect(new Set(seen).size).toBe(seen.length)
   })
 
-  it('returns an empty stores array on the page after the last one', async () => {
+  it('places a freshly-created store on the first page (newest-first)', async () => {
     const app = buildApp()
     const tag = uniqueTag()
     const onlyRow = await createStore(`${tag}-solo`)
 
-    // First page returns the row + an empty token (only one row exists).
-    const first = await app.fetch(get('?page_size=10'))
+    // Concurrent test files may have inserted other stores, so the
+    // continuation_token may or may not be empty here. The load-bearing
+    // contract is that a freshly-created store appears on the first page
+    // under newest-first ordering with a generous page_size.
+    const first = await app.fetch(get('?page_size=100'))
     const firstJson = await first.json() as ListStoresResponse
     const firstOurs = firstJson.stores.filter(s => s.name.startsWith(tag))
     expect(firstOurs.map(s => s.id)).toEqual([onlyRow.id])
-    expect(firstJson.continuation_token).toBe('')
   })
 
   it('returns 400 invalid_argument for a malformed continuation_token', async () => {
