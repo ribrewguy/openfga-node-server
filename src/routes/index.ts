@@ -27,7 +27,8 @@ import { Hono } from 'hono'
 import type { AuthorizationModel } from '@openfga/sdk'
 import { transformer, errors as transformerErrors } from '@openfga/syntax-transformer'
 import { createStore, listStoresPage } from '../storage/stores'
-import { listChangesPage } from '../storage/tuples'
+import { listChangesPage, readTuplesPage } from '../storage/tuples'
+import type { ReadTupleCursor } from '../storage/tuples'
 import { getAssertions, writeAssertions } from '../storage/assertions'
 import {
   getAuthorizationModel,
@@ -39,7 +40,6 @@ import {
   InvalidObjectReferenceError,
   MissingTupleError,
   applyTupleMutations,
-  readTuples,
   type TupleConflictMode,
 } from '../storage/tuples'
 import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
@@ -100,6 +100,18 @@ function encodeStoreCursor(c: StoreCursor): string {
   return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url')
 }
 
+/**
+ * Returns true when `value` parses as a real ISO 8601 / RFC 3339
+ * timestamp. Cursor decoders use this so a base64url-JSON token
+ * carrying `inserted_at: "not-a-timestamp"` is rejected at the
+ * decode boundary (400 invalid_argument) instead of reaching
+ * Postgres which would surface a 22007 invalid_datetime_format
+ * error as a 500. See openfga-5uv review.
+ */
+function isParseableTimestamp(value: string): boolean {
+  return Number.isFinite(Date.parse(value))
+}
+
 function decodeStoreCursor(token: string): StoreCursor | null {
   try {
     const json = Buffer.from(token, 'base64url').toString('utf8')
@@ -107,9 +119,42 @@ function decodeStoreCursor(token: string): StoreCursor | null {
     if (
       parsed && typeof parsed === 'object'
       && typeof (parsed as StoreCursor).created_at === 'string'
+      && isParseableTimestamp((parsed as StoreCursor).created_at)
       && typeof (parsed as StoreCursor).id === 'string'
     ) {
       return parsed as StoreCursor
+    }
+    return null
+  }
+  catch {
+    return null
+  }
+}
+
+/**
+ * Continuation tokens for /read pagination. The cursor carries the
+ * 5-field row-tuple (inserted_at + the natural unique key on
+ * openfga.tuple). Same opaque base64url-JSON encoding as the other
+ * cursors; malformed → 400.
+ */
+function encodeReadCursor(c: ReadTupleCursor): string {
+  return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url')
+}
+
+function decodeReadCursor(token: string): ReadTupleCursor | null {
+  try {
+    const json = Buffer.from(token, 'base64url').toString('utf8')
+    const parsed = JSON.parse(json) as unknown
+    if (
+      parsed && typeof parsed === 'object'
+      && typeof (parsed as ReadTupleCursor).inserted_at === 'string'
+      && isParseableTimestamp((parsed as ReadTupleCursor).inserted_at)
+      && typeof (parsed as ReadTupleCursor).object_type === 'string'
+      && typeof (parsed as ReadTupleCursor).object_id === 'string'
+      && typeof (parsed as ReadTupleCursor).relation === 'string'
+      && typeof (parsed as ReadTupleCursor).user_str === 'string'
+    ) {
+      return parsed as ReadTupleCursor
     }
     return null
   }
@@ -139,6 +184,7 @@ function decodeChangeCursor(token: string): ChangeCursor | null {
     if (
       parsed && typeof parsed === 'object'
       && typeof (parsed as ChangeCursor).inserted_at === 'string'
+      && isParseableTimestamp((parsed as ChangeCursor).inserted_at)
       && typeof (parsed as ChangeCursor).id === 'string'
     ) {
       return parsed as ChangeCursor
@@ -409,14 +455,25 @@ export function buildApp(): Hono {
     const storeId = c.req.param('storeId')
     const body = c.req.valid('json')
     const tk = body.tuple_key
-    let rows
+    let cursor: ReadTupleCursor | null = null
+    if (body.continuation_token !== undefined && body.continuation_token.length > 0) {
+      cursor = decodeReadCursor(body.continuation_token)
+      if (cursor === null) {
+        return c.json({ code: 'invalid_argument', message: 'continuation_token is malformed' }, 400)
+      }
+    }
+    let page
     try {
-      rows = await readTuples(storeId, {
-        object: tk?.object,
-        relation: tk?.relation,
-        user: tk?.user,
-        pageSize: body.page_size,
-      })
+      page = await readTuplesPage(
+        storeId,
+        {
+          object: tk?.object,
+          relation: tk?.relation,
+          user: tk?.user,
+          pageSize: body.page_size,
+        },
+        cursor,
+      )
     }
     catch (err) {
       if (err instanceof InvalidObjectReferenceError) {
@@ -425,7 +482,7 @@ export function buildApp(): Hono {
       throw err
     }
     return c.json({
-      tuples: rows.map(r => ({
+      tuples: page.rows.map(r => ({
         key: {
           user: r.user_str,
           relation: r.relation,
@@ -433,7 +490,7 @@ export function buildApp(): Hono {
         },
         timestamp: r.inserted_at,
       })),
-      continuation_token: '',
+      continuation_token: page.nextCursor === null ? '' : encodeReadCursor(page.nextCursor),
     })
   })
 

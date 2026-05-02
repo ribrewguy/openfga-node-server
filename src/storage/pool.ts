@@ -7,9 +7,22 @@
  * the model loader CLI share connections. Tests can `resetPool()` to
  * swap DSNs between cases.
  */
-import { Pool } from 'pg'
+import { Pool, types as pgTypes } from 'pg'
 import type { PoolConfig } from 'pg'
 import { logger } from '../logger'
+
+// Return timestamptz (OID 1184) and timestamp (OID 1114) as raw text
+// from Postgres rather than the default JS Date conversion. Date has
+// only millisecond precision, but Postgres timestamps carry
+// microseconds; the truncation breaks cursor pagination on tables
+// where multiple rows can share the same wall-clock millisecond
+// (e.g. tuples written in a single transaction). The text form
+// preserves full precision and round-trips losslessly through the
+// `<col>::timestamptz` cast on the return path. See openfga-5uv.
+const PG_OID_TIMESTAMPTZ = 1184
+const PG_OID_TIMESTAMP = 1114
+pgTypes.setTypeParser(PG_OID_TIMESTAMPTZ, (value) => value)
+pgTypes.setTypeParser(PG_OID_TIMESTAMP, (value) => value)
 
 let _pool: Pool | null = null
 

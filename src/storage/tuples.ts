@@ -57,6 +57,27 @@ export interface ReadFilter {
   pageSize?: number
 }
 
+/**
+ * Cursor for /read pagination. The 5-field row-tuple is the smallest
+ * stable total order on `openfga.tuple` since the table has no
+ * synthetic id column — (object_type, object_id, relation, user_str)
+ * is the natural unique key, and `inserted_at` provides the chrono
+ * ordering. ASC pagination uses `(inserted_at, ...) > $cursor`.
+ */
+export interface ReadTupleCursor {
+  inserted_at: string
+  object_type: string
+  object_id: string
+  relation: string
+  user_str: string
+}
+
+export interface ReadTuplesPage {
+  rows: TupleRow[]
+  /** Cursor for the next page; null when there are no more rows. */
+  nextCursor: ReadTupleCursor | null
+}
+
 export type TupleConflictMode = 'error' | 'ignore'
 
 export interface TupleMutations {
@@ -179,6 +200,28 @@ export async function readTuples(
   storeId: string,
   filter: ReadFilter,
 ): Promise<TupleRow[]> {
+  // Backwards-compatible non-paginated wrapper. New callers that need
+  // continuation tokens should use readTuplesPage directly.
+  const page = await readTuplesPage(storeId, filter, null)
+  return page.rows
+}
+
+/**
+ * Cursor-paginated read of tuples for a store. Same filter surface as
+ * readTuples plus an optional `cursor` arg; returns a page of rows
+ * plus a next-cursor (null when exhausted). The +1 fetch trick lets
+ * us decide "is there a next page" without a separate COUNT query.
+ *
+ * Ordering is ASC by (inserted_at, object_type, object_id, relation,
+ * user_str). The natural unique key (the latter four fields)
+ * provides total order so pagination is stable under inserts at the
+ * head of the timeline.
+ */
+export async function readTuplesPage(
+  storeId: string,
+  filter: ReadFilter,
+  cursor: ReadTupleCursor | null,
+): Promise<ReadTuplesPage> {
   const pool = getPool()
   const where: string[] = ['store_id = $1']
   const params: unknown[] = [storeId]
@@ -211,16 +254,40 @@ export async function readTuples(
     params.push(filter.user)
   }
 
-  const limit = filter.pageSize ?? 100
+  if (cursor) {
+    // Five-field row-tuple comparison gives a stable total order on
+    // the page boundary. Postgres compares row tuples lexicographically.
+    where.push(
+      `(inserted_at, object_type, object_id, relation, user_str)`
+      + ` > ($${p++}::timestamptz, $${p++}::text, $${p++}::text, $${p++}::text, $${p++}::text)`,
+    )
+    params.push(cursor.inserted_at, cursor.object_type, cursor.object_id, cursor.relation, cursor.user_str)
+  }
+
+  const pageSize = filter.pageSize ?? 100
   const { rows } = await pool.query<TupleRow>(
     `SELECT store_id, object_type, object_id, relation, user_str, inserted_at
        FROM openfga.tuple
       WHERE ${where.join(' AND ')}
-      ORDER BY inserted_at ASC
+      ORDER BY inserted_at ASC, object_type ASC, object_id ASC, relation ASC, user_str ASC
       LIMIT $${p}`,
-    [...params, limit],
+    [...params, pageSize + 1],
   )
-  return rows
+  if (rows.length <= pageSize) {
+    return { rows, nextCursor: null }
+  }
+  const page = rows.slice(0, pageSize)
+  const last = page[page.length - 1]!
+  return {
+    rows: page,
+    nextCursor: {
+      inserted_at: last.inserted_at,
+      object_type: last.object_type,
+      object_id: last.object_id,
+      relation: last.relation,
+      user_str: last.user_str,
+    },
+  }
 }
 
 export interface TupleChangeRow {
