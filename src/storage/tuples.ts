@@ -292,6 +292,7 @@ export async function readTuplesPage(
 
 export interface TupleChangeRow {
   id: string
+  seq: string
   object_type: string
   object_id: string
   relation: string
@@ -302,24 +303,38 @@ export interface TupleChangeRow {
 
 export interface ListChangesPage {
   rows: TupleChangeRow[]
-  /** Cursor for the next page; null when there are no more rows. */
-  nextCursor: { inserted_at: string, id: string } | null
+  /**
+   * Cursor for the next page; null when there are no more rows.
+   * The cursor uses (inserted_at, seq) — `seq` is a Postgres-side
+   * bigserial column that breaks same-millisecond ties
+   * deterministically, in insertion order. See openfga-ra9.
+   */
+  nextCursor: { inserted_at: string, seq: string } | null
 }
 
 /**
- * Newest-first paginated read of the changelog for a store. Optional
- * filters narrow by `objectType` (the OpenFGA `?type=` query) and
- * `startTime` (only changes recorded at or after the timestamp).
+ * Oldest-first (ASCENDING) paginated read of the changelog for a
+ * store. This matches the OpenFGA ReadChanges API which sequences
+ * tuple changes chronologically so polling-tail consumers can
+ * advance through history without missing or reordering events.
  *
- * Pagination uses (inserted_at, id) row-tuple comparison so a change
- * recorded at the head while a client is paging does not shift
- * previously-seen pages. The +1 fetch trick lets us decide
- * "is there a next page" without a separate COUNT query.
+ * Optional filters narrow by `objectType` (the OpenFGA `?type=`
+ * query) and `startTime` (only changes recorded at or after the
+ * timestamp).
+ *
+ * Pagination uses (inserted_at, id) row-tuple comparison with a
+ * strictly-greater-than predicate so a change recorded at the
+ * tail while a client is paging surfaces on the next call rather
+ * than shifting previously-seen pages. The +1 fetch trick lets us
+ * decide "is there a next page" without a separate COUNT query.
+ *
+ * See openfga-ra9 for the ordering inversion from the prior
+ * newest-first implementation.
  */
 export async function listChangesPage(
   storeId: string,
   pageSize: number,
-  cursor: { inserted_at: string, id: string } | null,
+  cursor: { inserted_at: string, seq: string } | null,
   opts: { objectType?: string, startTime?: string } = {},
 ): Promise<ListChangesPage> {
   const pool = getPool()
@@ -335,15 +350,15 @@ export async function listChangesPage(
     params.push(opts.startTime)
   }
   if (cursor) {
-    where.push(`(inserted_at, id) < ($${p++}::timestamptz, $${p++}::text)`)
-    params.push(cursor.inserted_at, cursor.id)
+    where.push(`(inserted_at, seq) > ($${p++}::timestamptz, $${p++}::bigint)`)
+    params.push(cursor.inserted_at, cursor.seq)
   }
 
   const { rows } = await pool.query<TupleChangeRow>(
-    `SELECT id, object_type, object_id, relation, user_str, operation, inserted_at
+    `SELECT id, seq, object_type, object_id, relation, user_str, operation, inserted_at
        FROM openfga.tuple_change
       WHERE ${where.join(' AND ')}
-      ORDER BY inserted_at DESC, id DESC
+      ORDER BY inserted_at ASC, seq ASC
       LIMIT $${p}`,
     [...params, pageSize + 1],
   )
@@ -352,7 +367,7 @@ export async function listChangesPage(
   }
   const page = rows.slice(0, pageSize)
   const last = page[page.length - 1]!
-  return { rows: page, nextCursor: { inserted_at: last.inserted_at, id: last.id } }
+  return { rows: page, nextCursor: { inserted_at: last.inserted_at, seq: last.seq } }
 }
 
 /**
