@@ -14,10 +14,10 @@
  *   POST   /stores/:storeId/read
  *   POST   /stores/:storeId/list-objects
  *   POST   /stores/:storeId/batch-check
+ *   POST   /stores/:storeId/expand
  *
  * Endpoints NOT implemented (return 501):
  *
- *   POST   /stores/:storeId/expand
  *   POST   /stores/:storeId/list-users
  *   POST   /stores/:storeId/assertions
  *   GET    /stores/:storeId/changes
@@ -45,6 +45,7 @@ import {
 } from '../storage/tuples'
 import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { check } from '../evaluator/check'
+import { expand } from '../evaluator/expand'
 import { listObjects } from '../evaluator/list-objects'
 import { InMemoryTupleStore, unionTupleStore } from '../evaluator/tuple-store'
 import type { TupleStore } from '../evaluator/tuple-store'
@@ -56,6 +57,7 @@ import {
   BatchCheckBody,
   CheckBody,
   CreateStoreBody,
+  ExpandBody,
   ListObjectsBody,
   ListStoresQuery,
   PageSizeQuery,
@@ -404,6 +406,33 @@ export function buildApp(): Hono {
     return c.json({ objects: ids.map(id => `${body.type}:${id}`) })
   })
 
+  // ─── Expand ─────────────────────────────────────────────────────
+  app.post('/stores/:storeId/expand', validate('json', ExpandBody), async (c) => {
+    const storeId = c.req.param('storeId')
+    const body = c.req.valid('json')
+    const ctx = await loadModelIndex(storeId, body.authorization_model_id)
+    if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
+
+    const { type: objectType, id: objectId } = (() => {
+      const idx = body.tuple_key.object.indexOf(':')
+      return { type: body.tuple_key.object.slice(0, idx), id: body.tuple_key.object.slice(idx + 1) }
+    })()
+
+    if (objectId === '') {
+      return c.json({ code: 'invalid_argument', message: 'tuple_key.object must be a full type:id reference' }, 400)
+    }
+
+    const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples?.tuple_keys)
+    const root = await expand(ctx.index, store, objectType, objectId, body.tuple_key.relation)
+    if (root === null) {
+      return c.json({
+        code: 'invalid_argument',
+        message: `relation "${body.tuple_key.relation}" is not defined for type "${objectType}"`,
+      }, 400)
+    }
+    return c.json({ tree: { root } })
+  })
+
   // ─── Batch check ────────────────────────────────────────────────
   app.post('/stores/:storeId/batch-check', validate('json', BatchCheckBody), async (c) => {
     const storeId = c.req.param('storeId')
@@ -439,7 +468,6 @@ export function buildApp(): Hono {
 
   // ─── Not implemented ────────────────────────────────────────────
   for (const path of [
-    '/stores/:storeId/expand',
     '/stores/:storeId/list-users',
     '/stores/:storeId/assertions',
   ] as const) {
