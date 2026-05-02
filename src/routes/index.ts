@@ -37,6 +37,7 @@ import {
 import { getStore } from '../storage/stores'
 import {
   DuplicateTupleError,
+  InvalidObjectReferenceError,
   MissingTupleError,
   applyTupleMutations,
   readTuples,
@@ -289,12 +290,21 @@ export function buildApp(): Hono {
     const storeId = c.req.param('storeId')
     const body = await c.req.json<ReadRequest>().catch(() => ({} as ReadRequest))
     const tk = body?.tuple_key
-    const rows = await readTuples(storeId, {
-      object: tk?.object,
-      relation: tk?.relation,
-      user: tk?.user,
-      pageSize: body?.page_size,
-    })
+    let rows
+    try {
+      rows = await readTuples(storeId, {
+        object: tk?.object,
+        relation: tk?.relation,
+        user: tk?.user,
+        pageSize: body?.page_size,
+      })
+    }
+    catch (err) {
+      if (err instanceof InvalidObjectReferenceError) {
+        return c.json({ code: 'invalid_argument', message: err.message }, 400)
+      }
+      throw err
+    }
     return c.json({
       tuples: rows.map(r => ({
         key: {
