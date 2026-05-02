@@ -8,9 +8,25 @@
  *
  * Spec: docs/features/request-validation.md
  */
-import { describe, expect, it } from 'vitest'
-import { buildApp } from '../../src/routes/index'
+import { describe, expect, it, vi } from 'vitest'
 
+// The requireStore middleware (openfga-rv0) calls getStore() on
+// every /stores/:storeId/* request. These tests intentionally
+// isolate the validation layer; mock storage so the middleware
+// lets requests pass through to the validators.
+vi.mock('../../src/storage/stores', () => ({
+  getStore: vi.fn().mockResolvedValue({
+    id: 'stub',
+    name: 'stub',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    deleted_at: null,
+  }),
+  createStore: vi.fn(),
+  listStoresPage: vi.fn(),
+}))
+
+const { buildApp } = await import('../../src/routes/index')
 const app = buildApp()
 
 function postJson(path: string, body: unknown): Request {
