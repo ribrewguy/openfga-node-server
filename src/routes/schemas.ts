@@ -26,25 +26,52 @@ import { z } from 'zod'
  *   - `<type>:<id>#<relation>` — userset
  *   - `<type>:*` — typed wildcard
  *
- * The character class on the right of the colon is intentionally
- * permissive; storage and evaluator layers enforce stricter semantics.
+ * The id portion is intentionally permissive: OpenFGA accepts
+ * generous identifiers (the concepts docs cite examples like
+ * `repository:auth0/express-jwt` and `organization:auth0.com`) so
+ * the regex excludes only the structural delimiters `:` and `#` and
+ * whitespace, not specific character classes. Storage and evaluator
+ * layers parse on `:` and `#` so admitting them inside ids would
+ * break round-tripping.
+ *
+ * For OBJECT_REF the id portion is OPTIONAL: an OpenFGA `read`
+ * filter admits `<type>:` to mean "all objects of this type". For
+ * USER_REF the id portion is REQUIRED — a `user` field with a bare
+ * `<type>:` is not a meaningful OpenFGA wire shape.
  */
-const OBJECT_REF = z.string().regex(/^[A-Za-z0-9_]+:[A-Za-z0-9_:#*-]*$/)
+const OBJECT_REF = z.string().regex(/^[A-Za-z0-9_]+:([^:#\s]+(#[A-Za-z0-9_]+)?|\*)?$/)
+
+/**
+ * User reference matching the OpenFGA wire forms accepted on the
+ * `user` field of a tuple key:
+ *
+ *   - `<type>:<id>` — concrete object (e.g. `user:alice`,
+ *     `repository:auth0/express-jwt`, `organization:auth0.com`)
+ *   - `<type>:<id>#<relation>` — userset (e.g. `group:eng#member`,
+ *     `organization:auth0.com#member`)
+ *   - `<type>:*` — typed wildcard (e.g. `user:*`)
+ *
+ * Without this regex, a malformed user like `"alice"` (no colon)
+ * passes Zod and reaches the evaluator's parseObject which throws
+ * InvalidObjectReferenceError — surfaced as 500 Internal Server
+ * Error rather than a client-safe 400. See openfga-vnl.
+ */
+const USER_REF = z.string().regex(/^[A-Za-z0-9_]+:([^:#\s]+(#[A-Za-z0-9_]+)?|\*)$/)
 
 const TUPLE_KEY = z.object({
-  user: z.string().min(1),
+  user: USER_REF,
   relation: z.string().min(1),
   object: OBJECT_REF,
 }).passthrough()
 
 const TUPLE_KEY_FILTER = z.object({
-  user: z.string().optional(),
+  user: USER_REF.optional(),
   relation: z.string().optional(),
   object: OBJECT_REF.optional(),
 }).passthrough()
 
 const TUPLE_KEY_NO_CONDITION = z.object({
-  user: z.string().min(1),
+  user: USER_REF,
   relation: z.string().min(1),
   object: OBJECT_REF,
 }).passthrough()
@@ -153,7 +180,7 @@ export const ReadBody = z.object({
 // ─── PUT /stores/:storeId/assertions/:authorizationModelId ────────
 
 const ASSERTION_TUPLE_KEY = z.object({
-  user: z.string().min(1),
+  user: USER_REF,
   relation: z.string().min(1),
   object: OBJECT_REF,
 }).passthrough()
@@ -255,7 +282,7 @@ export const BatchCheckBody = z
 export const ListObjectsBody = z.object({
   type: z.string().min(1),
   relation: z.string().min(1),
-  user: z.string().min(1),
+  user: USER_REF,
   authorization_model_id: z.string().optional(),
   contextual_tuples: z
     .object({

@@ -81,6 +81,34 @@ describe('request validation — POST /stores/:storeId/check', () => {
     )
   })
 
+  // Regression for openfga-vnl: prior schema accepted any non-empty
+  // string for tuple_key.user, so malformed users like 'alice' (no
+  // colon) reached the evaluator's parseObject and surfaced as 500
+  // Internal Server Error instead of a client-safe 400.
+  it('rejects malformed user reference (no colon) at the validation boundary', async () => {
+    await expectInvalidArgument(
+      await app.fetch(postJson('/stores/abc/check', {
+        tuple_key: { user: 'alice', relation: 'viewer', object: 'doc:1' },
+      })),
+    )
+  })
+
+  it('rejects user reference with empty id portion', async () => {
+    await expectInvalidArgument(
+      await app.fetch(postJson('/stores/abc/check', {
+        tuple_key: { user: 'user:', relation: 'viewer', object: 'doc:1' },
+      })),
+    )
+  })
+
+  it('rejects user reference with empty type portion', async () => {
+    await expectInvalidArgument(
+      await app.fetch(postJson('/stores/abc/check', {
+        tuple_key: { user: ':alice', relation: 'viewer', object: 'doc:1' },
+      })),
+    )
+  })
+
   it('rejects malformed object reference (no colon)', async () => {
     await expectInvalidArgument(
       await app.fetch(postJson('/stores/abc/check', {
@@ -147,6 +175,66 @@ describe('request validation — POST /stores/:storeId/list-objects', () => {
       await app.fetch(postJson('/stores/abc/list-objects', { type: 'doc', relation: 'viewer' })),
     )
   })
+
+  it('rejects malformed user reference (no colon) at the validation boundary', async () => {
+    await expectInvalidArgument(
+      await app.fetch(postJson('/stores/abc/list-objects', {
+        type: 'doc',
+        relation: 'viewer',
+        user: 'alice',
+      })),
+    )
+  })
+})
+
+describe('request validation — accepted user shapes pass the boundary', () => {
+  // These cases exercise USER_REF on /check. Each request fails
+  // somewhere downstream of validation (either the route's storeId
+  // lookup or the model lookup), but the load-bearing assertion is
+  // that none of them is rejected with a 400 invalid_argument from
+  // the validation layer. The list covers the three structural
+  // shapes (concrete, userset, wildcard) plus OpenFGA-spec example
+  // identifiers that contain '/' and '.' — see the openfga-vnl
+  // review that flagged the original regex as too tight.
+  for (const user of [
+    'user:alice',
+    'group:eng#member',
+    'user:*',
+    'repository:auth0/express-jwt',
+    'organization:auth0.com#member',
+    'user:550e8400-e29b-41d4-a716-446655440000',
+  ]) {
+    it(`accepts a well-formed user '${user}' at the validation boundary`, async () => {
+      const res = await app.fetch(postJson('/stores/abc/check', {
+        tuple_key: { user, relation: 'viewer', object: 'doc:1' },
+      }))
+      expect(res.status).not.toBe(400)
+    })
+  }
+})
+
+describe('request validation — accepted object shapes pass the boundary', () => {
+  // OBJECT_REF must accept the same generous id character class as
+  // USER_REF for concrete refs. /read also admits the type-only
+  // filter `<type>:`. Cases below exercise the route boundary on
+  // /read because that endpoint is the one that takes object as a
+  // standalone field; the load-bearing assertion is no 400 from
+  // validation.
+  for (const object of [
+    'doc:1',
+    'doc:',
+    'doc:*',
+    'doc:1#viewer',
+    'repository:auth0/express-jwt',
+    'organization:auth0.com#member',
+  ]) {
+    it(`accepts a well-formed object '${object}' at the validation boundary`, async () => {
+      const res = await app.fetch(postJson('/stores/abc/read', {
+        tuple_key: { object },
+      }))
+      expect(res.status).not.toBe(400)
+    })
+  }
 })
 
 describe('request validation — malformed JSON', () => {
