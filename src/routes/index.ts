@@ -15,6 +15,7 @@
  *   POST   /stores/:storeId/list-objects
  *   POST   /stores/:storeId/batch-check
  *   POST   /stores/:storeId/expand
+ *   POST   /stores/:storeId/list-users
  *
  * Endpoints NOT implemented (return 501):
  *
@@ -47,6 +48,7 @@ import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { check } from '../evaluator/check'
 import { expand } from '../evaluator/expand'
 import { listObjects } from '../evaluator/list-objects'
+import { listUsers } from '../evaluator/list-users'
 import { InMemoryTupleStore, unionTupleStore } from '../evaluator/tuple-store'
 import type { TupleStore } from '../evaluator/tuple-store'
 import { requestLog } from '../middleware/request-log'
@@ -60,6 +62,7 @@ import {
   ExpandBody,
   ListObjectsBody,
   ListStoresQuery,
+  ListUsersBody,
   PageSizeQuery,
   ReadBody,
   WriteAuthorizationModelBody,
@@ -406,6 +409,33 @@ export function buildApp(): Hono {
     return c.json({ objects: ids.map(id => `${body.type}:${id}`) })
   })
 
+  // ─── List users ─────────────────────────────────────────────────
+  app.post('/stores/:storeId/list-users', validate('json', ListUsersBody), async (c) => {
+    const storeId = c.req.param('storeId')
+    const body = c.req.valid('json')
+    const ctx = await loadModelIndex(storeId, body.authorization_model_id)
+    if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
+
+    // ListUsersRequest's contextual_tuples is a flat array (unlike
+    // check/list-objects) — adapt to the same overlay helper.
+    const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples)
+    const users = await listUsers(
+      ctx.index,
+      store,
+      body.object.type,
+      body.object.id,
+      body.relation,
+      body.user_filters[0]!,
+    )
+    if (users === null) {
+      return c.json({
+        code: 'invalid_argument',
+        message: `relation "${body.relation}" is not defined for type "${body.object.type}"`,
+      }, 400)
+    }
+    return c.json({ users })
+  })
+
   // ─── Expand ─────────────────────────────────────────────────────
   app.post('/stores/:storeId/expand', validate('json', ExpandBody), async (c) => {
     const storeId = c.req.param('storeId')
@@ -468,7 +498,6 @@ export function buildApp(): Hono {
 
   // ─── Not implemented ────────────────────────────────────────────
   for (const path of [
-    '/stores/:storeId/list-users',
     '/stores/:storeId/assertions',
   ] as const) {
     app.post(path, c => c.json({ code: 'not_implemented', message: `${path} is not implemented` }, 501))
