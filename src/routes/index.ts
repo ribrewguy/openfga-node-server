@@ -164,13 +164,20 @@ function decodeReadCursor(token: string): ReadTupleCursor | null {
 }
 
 /**
- * Continuation tokens for /changes pagination. Same opaque-base64url
- * pattern as StoreCursor — different cursor fields because the table
- * is ordered by (inserted_at, id) rather than (created_at, id).
+ * Continuation tokens for /changes pagination. Carries (inserted_at,
+ * seq) for deterministic per-insertion ordering (see openfga-ra9
+ * migration 1778083200000_tuple-change-seq.sql) plus the type
+ * filter that produced the token. The type field lets the route
+ * handler reject cross-filter token reuse: a token issued by
+ * `?type=doc` cannot be replayed without `?type=doc` (or with a
+ * different type), which would otherwise leak unrelated object-type
+ * changes into a filtered polling stream.
  */
 interface ChangeCursor {
   inserted_at: string
-  id: string
+  seq: string
+  /** Object-type filter active when the cursor was issued; null when no filter. */
+  type: string | null
 }
 
 function encodeChangeCursor(c: ChangeCursor): string {
@@ -185,7 +192,11 @@ function decodeChangeCursor(token: string): ChangeCursor | null {
       parsed && typeof parsed === 'object'
       && typeof (parsed as ChangeCursor).inserted_at === 'string'
       && isParseableTimestamp((parsed as ChangeCursor).inserted_at)
-      && typeof (parsed as ChangeCursor).id === 'string'
+      && typeof (parsed as ChangeCursor).seq === 'string'
+      && (
+        (parsed as ChangeCursor).type === null
+        || typeof (parsed as ChangeCursor).type === 'string'
+      )
     ) {
       return parsed as ChangeCursor
     }
@@ -624,21 +635,70 @@ export function buildApp(): Hono {
     },
   )
   // ─── Changes ────────────────────────────────────────────────────
+  // Per OpenFGA's ReadChanges semantics: oldest-first ordering
+  // (see listChangesPage), and an exhausted continuation read echoes
+  // the supplied token so polling-tail clients can resume from the
+  // same position when new events arrive. See openfga-ra9.
   app.get('/stores/:storeId/changes', validate('query', ChangesQuery), async (c) => {
     const storeId = c.req.param('storeId')
     const { type, page_size, continuation_token, start_time } = c.req.valid('query')
     const pageSize = Math.min(Math.max(page_size ?? 50, 1), 100)
+    const suppliedToken = (continuation_token !== undefined && continuation_token.length > 0)
+      ? continuation_token
+      : null
+    const requestType: string | null = type ?? null
     let cursor: ChangeCursor | null = null
-    if (continuation_token !== undefined && continuation_token.length > 0) {
-      cursor = decodeChangeCursor(continuation_token)
+    if (suppliedToken !== null) {
+      cursor = decodeChangeCursor(suppliedToken)
       if (cursor === null) {
         return c.json({ code: 'invalid_argument', message: 'continuation_token is malformed' }, 400)
+      }
+      // Cross-filter token reuse is rejected: a token issued under
+      // one type filter is not valid under a different filter.
+      if (cursor.type !== requestType) {
+        return c.json({
+          code: 'invalid_argument',
+          message: cursor.type === null
+            ? 'continuation_token was issued without a type filter; do not pass `type` on the continuation call'
+            : `continuation_token was issued with type=${cursor.type}; the same type filter must be supplied`,
+        }, 400)
       }
     }
     const page = await listChangesPage(storeId, pageSize, cursor, {
       objectType: type,
       startTime: start_time,
     })
+
+    // Pick the response token:
+    //   - If we returned new rows, the next cursor either advances
+    //     (more rows after this page) or wraps to the last row's
+    //     position (this page exhausts current history; future polls
+    //     resume after the last seen row).
+    //   - If we returned no rows AND the caller supplied a token,
+    //     echo that token so the next poll re-checks the same
+    //     position for newly-arrived events.
+    //   - Otherwise (no rows, no supplied token), the timeline is
+    //     empty for this caller; return an empty token so a fresh
+    //     call starts from scratch.
+    let responseToken: string
+    if (page.nextCursor !== null) {
+      responseToken = encodeChangeCursor({ ...page.nextCursor, type: requestType })
+    }
+    else if (page.rows.length > 0) {
+      const last = page.rows[page.rows.length - 1]!
+      responseToken = encodeChangeCursor({
+        inserted_at: last.inserted_at,
+        seq: last.seq,
+        type: requestType,
+      })
+    }
+    else if (suppliedToken !== null) {
+      responseToken = suppliedToken
+    }
+    else {
+      responseToken = ''
+    }
+
     return c.json({
       changes: page.rows.map((r) => ({
         tuple_key: {
@@ -649,7 +709,7 @@ export function buildApp(): Hono {
         operation: r.operation,
         timestamp: r.inserted_at,
       })),
-      continuation_token: page.nextCursor === null ? '' : encodeChangeCursor(page.nextCursor),
+      continuation_token: responseToken,
     })
   })
 
