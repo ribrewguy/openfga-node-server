@@ -22,3 +22,18 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.0.0 ---
+
+# --- BEGIN PROJECT VERIFY GATE (openfga-8nw) ---
+# Run the full local gate (lint + typecheck + build + coverage with
+# thresholds). Pre-push is the right place for this — it catches
+# coverage regressions before they reach CI without slowing down
+# every per-commit iteration. Requires OPENFGA_DB_URL to be set and
+# Postgres reachable so the integration project runs and the
+# coverage threshold gate is meaningful. Use `SKIP_VERIFY=1 git push`
+# or `git push --no-verify` to bypass for emergency pushes.
+if [ "$SKIP_VERIFY" = "1" ]; then
+  echo "[verify] SKIP_VERIFY=1 — skipping pnpm verify"
+else
+  pnpm verify || exit $?
+fi
+# --- END PROJECT VERIFY GATE ---
