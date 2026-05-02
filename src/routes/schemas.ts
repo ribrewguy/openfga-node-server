@@ -61,6 +61,24 @@ export const PageSizeQuery = z.object({
     .transform((v) => (v === undefined ? undefined : Number(v))),
 }).passthrough()
 
+export const ChangesQuery = z.object({
+  type: z.string().min(1).optional(),
+  page_size: z
+    .string()
+    .optional()
+    .refine((v) => v === undefined || /^\d+$/.test(v), {
+      message: 'page_size must be a non-negative integer',
+    })
+    .transform((v) => (v === undefined ? undefined : Number(v))),
+  continuation_token: z.string().optional(),
+  start_time: z
+    .string()
+    .optional()
+    .refine((v) => v === undefined || !Number.isNaN(Date.parse(v)), {
+      message: 'start_time must be an RFC 3339 / ISO 8601 timestamp',
+    }),
+}).passthrough()
+
 export const ListStoresQuery = z.object({
   page_size: z
     .string()

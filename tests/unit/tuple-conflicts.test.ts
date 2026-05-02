@@ -64,10 +64,11 @@ describe('tuple mutation conflict handling', () => {
 
   it('rolls back missing deletes by default after earlier writes in the same request', async () => {
     query
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ rowCount: 1 })
-      .mockResolvedValueOnce({ rowCount: 0 })
-      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rowCount: 1 }) // INSERT tuple — success
+      .mockResolvedValueOnce({}) // INSERT tuple_change (write) — recorded transactionally
+      .mockResolvedValueOnce({ rowCount: 0 }) // DELETE tuple — missing
+      .mockResolvedValueOnce({}) // ROLLBACK
 
     await expect(applyTupleMutations('store-1', {
       writes: [{ user: 'user:alice', relation: 'viewer', object: 'doc:1' }],
@@ -78,7 +79,8 @@ describe('tuple mutation conflict handling', () => {
 
     expect(query.mock.calls.map(call => call[0])).toEqual([
       'BEGIN',
-      expect.stringContaining('INSERT INTO openfga.tuple'),
+      expect.stringContaining('INSERT INTO openfga.tuple '),
+      expect.stringContaining('INSERT INTO openfga.tuple_change'),
       expect.stringContaining('DELETE FROM openfga.tuple'),
       'ROLLBACK',
     ])
