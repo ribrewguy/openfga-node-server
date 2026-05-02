@@ -34,7 +34,6 @@ import {
   listAuthorizationModels,
   writeAuthorizationModel,
 } from '../storage/authorization-models'
-import { getStore } from '../storage/stores'
 import {
   DuplicateTupleError,
   InvalidObjectReferenceError,
@@ -53,6 +52,7 @@ import type { TupleStore } from '../evaluator/tuple-store'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
 import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
+import { requireStore } from '../middleware/require-store'
 import { validate } from '../middleware/validation'
 import {
   BatchCheckBody,
@@ -213,6 +213,14 @@ export function buildApp(): Hono {
   // for the dispatch and the supported modes.
   app.use('/stores/*', authMiddleware(loadAuthConfigFromEnv()))
 
+  // Store-existence guard. Mounted on /stores/:storeId/* so every
+  // store-scoped route returns a 404 store_id_not_found before any
+  // handler logic runs. POST /stores (create) is correctly excluded
+  // by the path scope. AFTER auth (don't leak existence to
+  // unauthenticated callers); BEFORE idempotency (don't create
+  // idempotency-key entries for non-existent stores). See openfga-rv0.
+  app.use('/stores/:storeId/*', requireStore())
+
   // Idempotency-Key support for the three mutating endpoints in scope
   // (PRD §"Idempotency keys", docs/features/idemnpotency-keys.md).
   // Mode and TTL are read from OPENFGA_IDEMPOTENCY_MODE /
@@ -268,8 +276,7 @@ export function buildApp(): Hono {
   // ─── Authorization models ───────────────────────────────────────
   app.post('/stores/:storeId/authorization-models', async (c) => {
     const storeId = c.req.param('storeId')
-    const store = await getStore(storeId)
-    if (!store) return c.json({ code: 'not_found', message: 'store not found' }, 404)
+    // Store existence is enforced upstream by requireStore middleware.
 
     let model: Partial<AuthorizationModel>
     if (isDslContentType(c.req.header('content-type'))) {
@@ -313,8 +320,7 @@ export function buildApp(): Hono {
 
   app.get('/stores/:storeId/authorization-models', validate('query', PageSizeQuery), async (c) => {
     const storeId = c.req.param('storeId')
-    const store = await getStore(storeId)
-    if (!store) return c.json({ code: 'not_found', message: 'store not found' }, 404)
+    // Store existence is enforced upstream by requireStore middleware.
 
     const { page_size } = c.req.valid('query')
     const pageSize = Math.min(page_size ?? 50, 100)

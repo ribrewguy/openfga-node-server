@@ -54,10 +54,21 @@ function writeRequest(body: unknown): Request {
 }
 
 describe('write route', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     applyTupleMutations.mockReset()
     loadModelIndex.mockReset()
     loadModelIndex.mockResolvedValue({ modelId: 'model-1', index: modelIndex })
+    // requireStore middleware (openfga-rv0) calls getStore on every
+    // /stores/:storeId/* request. Default to a non-null stub so the
+    // existing happy-path tests don't 404 at the middleware.
+    const { getStore } = await import('../../src/storage/stores')
+    vi.mocked(getStore).mockResolvedValue({
+      id: 'store-1',
+      name: 'store-1',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      deleted_at: null,
+    })
     delete process.env['OPENFGA_AUTH_MODE']
     delete process.env['OPENFGA_IDEMPOTENCY_MODE']
   })
