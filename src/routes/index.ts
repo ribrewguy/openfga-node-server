@@ -30,6 +30,7 @@ import { Hono } from 'hono'
 import type { AuthorizationModel } from '@openfga/sdk'
 import { transformer, errors as transformerErrors } from '@openfga/syntax-transformer'
 import { createStore, listStoresPage } from '../storage/stores'
+import { listChangesPage } from '../storage/tuples'
 import {
   getAuthorizationModel,
   listAuthorizationModels,
@@ -57,6 +58,7 @@ import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
 import { validate } from '../middleware/validation'
 import {
   BatchCheckBody,
+  ChangesQuery,
   CheckBody,
   CreateStoreBody,
   ExpandBody,
@@ -109,6 +111,38 @@ function decodeStoreCursor(token: string): StoreCursor | null {
       && typeof (parsed as StoreCursor).id === 'string'
     ) {
       return parsed as StoreCursor
+    }
+    return null
+  }
+  catch {
+    return null
+  }
+}
+
+/**
+ * Continuation tokens for /changes pagination. Same opaque-base64url
+ * pattern as StoreCursor — different cursor fields because the table
+ * is ordered by (inserted_at, id) rather than (created_at, id).
+ */
+interface ChangeCursor {
+  inserted_at: string
+  id: string
+}
+
+function encodeChangeCursor(c: ChangeCursor): string {
+  return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url')
+}
+
+function decodeChangeCursor(token: string): ChangeCursor | null {
+  try {
+    const json = Buffer.from(token, 'base64url').toString('utf8')
+    const parsed = JSON.parse(json) as unknown
+    if (
+      parsed && typeof parsed === 'object'
+      && typeof (parsed as ChangeCursor).inserted_at === 'string'
+      && typeof (parsed as ChangeCursor).id === 'string'
+    ) {
+      return parsed as ChangeCursor
     }
     return null
   }
@@ -502,7 +536,35 @@ export function buildApp(): Hono {
   ] as const) {
     app.post(path, c => c.json({ code: 'not_implemented', message: `${path} is not implemented` }, 501))
   }
-  app.get('/stores/:storeId/changes', c => c.json({ code: 'not_implemented', message: 'changes is not implemented' }, 501))
+  // ─── Changes ────────────────────────────────────────────────────
+  app.get('/stores/:storeId/changes', validate('query', ChangesQuery), async (c) => {
+    const storeId = c.req.param('storeId')
+    const { type, page_size, continuation_token, start_time } = c.req.valid('query')
+    const pageSize = Math.min(Math.max(page_size ?? 50, 1), 100)
+    let cursor: ChangeCursor | null = null
+    if (continuation_token !== undefined && continuation_token.length > 0) {
+      cursor = decodeChangeCursor(continuation_token)
+      if (cursor === null) {
+        return c.json({ code: 'invalid_argument', message: 'continuation_token is malformed' }, 400)
+      }
+    }
+    const page = await listChangesPage(storeId, pageSize, cursor, {
+      objectType: type,
+      startTime: start_time,
+    })
+    return c.json({
+      changes: page.rows.map((r) => ({
+        tuple_key: {
+          user: r.user_str,
+          relation: r.relation,
+          object: `${r.object_type}:${r.object_id}`,
+        },
+        operation: r.operation,
+        timestamp: r.inserted_at,
+      })),
+      continuation_token: page.nextCursor === null ? '' : encodeChangeCursor(page.nextCursor),
+    })
+  })
 
   return app
 }

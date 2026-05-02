@@ -15,6 +15,7 @@
  */
 import type { TupleKey, TupleKeyWithoutCondition } from '@openfga/sdk'
 import { getPool } from './pool'
+import { generateId } from './ids'
 
 export interface TupleRow {
   store_id: string
@@ -97,6 +98,18 @@ export async function applyTupleMutations(
       if (result.rowCount === 0 && mutations.onDuplicate === 'error') {
         throw new DuplicateTupleError(t)
       }
+      // Record the change in the same transaction as the mutation
+      // so a crash between the two cannot leave the changelog out of
+      // sync with tuple state. Skip when ON CONFLICT silently ignored
+      // — the caller asked for at-most-once semantics on duplicates.
+      if (result.rowCount && result.rowCount > 0) {
+        await client.query(
+          `INSERT INTO openfga.tuple_change
+             (id, store_id, object_type, object_id, relation, user_str, operation)
+           VALUES ($1, $2, $3, $4, $5, $6, 'TUPLE_OPERATION_WRITE')`,
+          [generateId(), storeId, obj.type, obj.id, t.relation, t.user],
+        )
+      }
     }
 
     for (const t of mutations.deletes) {
@@ -112,6 +125,16 @@ export async function applyTupleMutations(
       )
       if (result.rowCount === 0 && mutations.onMissing === 'error') {
         throw new MissingTupleError(t)
+      }
+      // Same transactional invariant as writes: only record a change
+      // when the DELETE actually removed a row.
+      if (result.rowCount && result.rowCount > 0) {
+        await client.query(
+          `INSERT INTO openfga.tuple_change
+             (id, store_id, object_type, object_id, relation, user_str, operation)
+           VALUES ($1, $2, $3, $4, $5, $6, 'TUPLE_OPERATION_DELETE')`,
+          [generateId(), storeId, obj.type, obj.id, t.relation, t.user],
+        )
       }
     }
 
@@ -198,6 +221,71 @@ export async function readTuples(
     [...params, limit],
   )
   return rows
+}
+
+export interface TupleChangeRow {
+  id: string
+  object_type: string
+  object_id: string
+  relation: string
+  user_str: string
+  operation: 'TUPLE_OPERATION_WRITE' | 'TUPLE_OPERATION_DELETE'
+  inserted_at: string
+}
+
+export interface ListChangesPage {
+  rows: TupleChangeRow[]
+  /** Cursor for the next page; null when there are no more rows. */
+  nextCursor: { inserted_at: string, id: string } | null
+}
+
+/**
+ * Newest-first paginated read of the changelog for a store. Optional
+ * filters narrow by `objectType` (the OpenFGA `?type=` query) and
+ * `startTime` (only changes recorded at or after the timestamp).
+ *
+ * Pagination uses (inserted_at, id) row-tuple comparison so a change
+ * recorded at the head while a client is paging does not shift
+ * previously-seen pages. The +1 fetch trick lets us decide
+ * "is there a next page" without a separate COUNT query.
+ */
+export async function listChangesPage(
+  storeId: string,
+  pageSize: number,
+  cursor: { inserted_at: string, id: string } | null,
+  opts: { objectType?: string, startTime?: string } = {},
+): Promise<ListChangesPage> {
+  const pool = getPool()
+  const where: string[] = ['store_id = $1']
+  const params: unknown[] = [storeId]
+  let p = 2
+  if (opts.objectType) {
+    where.push(`object_type = $${p++}`)
+    params.push(opts.objectType)
+  }
+  if (opts.startTime) {
+    where.push(`inserted_at >= $${p++}::timestamptz`)
+    params.push(opts.startTime)
+  }
+  if (cursor) {
+    where.push(`(inserted_at, id) < ($${p++}::timestamptz, $${p++}::text)`)
+    params.push(cursor.inserted_at, cursor.id)
+  }
+
+  const { rows } = await pool.query<TupleChangeRow>(
+    `SELECT id, object_type, object_id, relation, user_str, operation, inserted_at
+       FROM openfga.tuple_change
+      WHERE ${where.join(' AND ')}
+      ORDER BY inserted_at DESC, id DESC
+      LIMIT $${p}`,
+    [...params, pageSize + 1],
+  )
+  if (rows.length <= pageSize) {
+    return { rows, nextCursor: null }
+  }
+  const page = rows.slice(0, pageSize)
+  const last = page[page.length - 1]!
+  return { rows: page, nextCursor: { inserted_at: last.inserted_at, id: last.id } }
 }
 
 /**
