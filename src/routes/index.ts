@@ -4,6 +4,7 @@
  *
  * Implemented endpoints:
  *
+ *   GET    /stores
  *   POST   /stores
  *   GET    /stores/:storeId/authorization-models
  *   POST   /stores/:storeId/authorization-models
@@ -15,7 +16,6 @@
  *
  * Endpoints NOT implemented (return 501):
  *
- *   GET    /stores
  *   POST   /stores/:storeId/expand
  *   POST   /stores/:storeId/batch-check
  *   POST   /stores/:storeId/list-users
@@ -28,7 +28,7 @@
 import { Hono } from 'hono'
 import type { AuthorizationModel } from '@openfga/sdk'
 import { transformer, errors as transformerErrors } from '@openfga/syntax-transformer'
-import { createStore } from '../storage/stores'
+import { createStore, listStoresPage } from '../storage/stores'
 import {
   getAuthorizationModel,
   listAuthorizationModels,
@@ -56,6 +56,7 @@ import {
   CheckBody,
   CreateStoreBody,
   ListObjectsBody,
+  ListStoresQuery,
   PageSizeQuery,
   ReadBody,
   WriteAuthorizationModelBody,
@@ -75,6 +76,39 @@ function isDslContentType(header: string | undefined): boolean {
   if (!header) return false
   const type = header.split(';', 1)[0]!.trim().toLowerCase()
   return type === 'application/x-openfga-dsl' || type === 'text/plain'
+}
+
+/**
+ * Continuation tokens for /stores pagination are opaque to clients.
+ * Encoding: base64(JSON({ created_at, id })). Anything that doesn't
+ * decode cleanly into a {created_at, id} pair is a 400 — clients are
+ * expected to round-trip the exact token the previous page returned.
+ */
+interface StoreCursor {
+  created_at: string
+  id: string
+}
+
+function encodeStoreCursor(c: StoreCursor): string {
+  return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url')
+}
+
+function decodeStoreCursor(token: string): StoreCursor | null {
+  try {
+    const json = Buffer.from(token, 'base64url').toString('utf8')
+    const parsed = JSON.parse(json) as unknown
+    if (
+      parsed && typeof parsed === 'object'
+      && typeof (parsed as StoreCursor).created_at === 'string'
+      && typeof (parsed as StoreCursor).id === 'string'
+    ) {
+      return parsed as StoreCursor
+    }
+    return null
+  }
+  catch {
+    return null
+  }
 }
 
 /**
@@ -159,6 +193,28 @@ export function buildApp(): Hono {
   app.get('/health', (c) => c.json({ status: 'ok' }))
 
   // ─── Stores ─────────────────────────────────────────────────────
+  app.get('/stores', validate('query', ListStoresQuery), async (c) => {
+    const { page_size, continuation_token } = c.req.valid('query')
+    const pageSize = Math.min(Math.max(page_size ?? 50, 1), 100)
+    let cursor: StoreCursor | null = null
+    if (continuation_token !== undefined && continuation_token.length > 0) {
+      cursor = decodeStoreCursor(continuation_token)
+      if (cursor === null) {
+        return c.json({ code: 'invalid_argument', message: 'continuation_token is malformed' }, 400)
+      }
+    }
+    const page = await listStoresPage(pageSize, cursor)
+    return c.json({
+      stores: page.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      })),
+      continuation_token: page.nextCursor === null ? '' : encodeStoreCursor(page.nextCursor),
+    })
+  })
+
   app.post('/stores', validate('json', CreateStoreBody), async (c) => {
     const body = c.req.valid('json')
     const row = await createStore(body.name.trim())
@@ -356,7 +412,6 @@ export function buildApp(): Hono {
   ] as const) {
     app.post(path, c => c.json({ code: 'not_implemented', message: `${path} is not implemented` }, 501))
   }
-  app.get('/stores', c => c.json({ code: 'not_implemented', message: 'GET /stores is not implemented' }, 501))
   app.get('/stores/:storeId/changes', c => c.json({ code: 'not_implemented', message: 'changes is not implemented' }, 501))
 
   return app
