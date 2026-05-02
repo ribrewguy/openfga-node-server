@@ -132,6 +132,44 @@ export const ReadBody = z.object({
   continuation_token: z.string().optional(),
 }).passthrough()
 
+// ─── POST /stores/:storeId/batch-check ────────────────────────────
+
+const CORRELATION_ID = z.string().regex(/^[A-Za-z0-9-]{1,36}$/, {
+  message: 'correlation_id must contain only letters, numbers, or hyphens and be ≤ 36 characters',
+})
+
+const BatchCheckItem = z.object({
+  tuple_key: TUPLE_KEY,
+  contextual_tuples: z
+    .object({
+      tuple_keys: z.array(TUPLE_KEY).optional(),
+    })
+    .passthrough()
+    .optional(),
+  context: z.unknown().optional(),
+  correlation_id: CORRELATION_ID,
+}).passthrough()
+
+export const BATCH_CHECK_MAX_ITEMS = 50
+
+export const BatchCheckBody = z
+  .object({
+    checks: z.array(BatchCheckItem).min(1).max(BATCH_CHECK_MAX_ITEMS),
+    authorization_model_id: z.string().optional(),
+  })
+  .passthrough()
+  .refine(
+    (b) => {
+      const seen = new Set<string>()
+      for (const c of b.checks) {
+        if (seen.has(c.correlation_id)) return false
+        seen.add(c.correlation_id)
+      }
+      return true
+    },
+    { message: 'correlation_id values must be unique within a batch' },
+  )
+
 // ─── POST /stores/:storeId/list-objects ───────────────────────────
 
 export const ListObjectsBody = z.object({

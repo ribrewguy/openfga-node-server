@@ -13,11 +13,11 @@
  *   POST   /stores/:storeId/write
  *   POST   /stores/:storeId/read
  *   POST   /stores/:storeId/list-objects
+ *   POST   /stores/:storeId/batch-check
  *
  * Endpoints NOT implemented (return 501):
  *
  *   POST   /stores/:storeId/expand
- *   POST   /stores/:storeId/batch-check
  *   POST   /stores/:storeId/list-users
  *   POST   /stores/:storeId/assertions
  *   GET    /stores/:storeId/changes
@@ -53,6 +53,7 @@ import { idempotencyMiddleware } from '../middleware/idempotency'
 import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
 import { validate } from '../middleware/validation'
 import {
+  BatchCheckBody,
   CheckBody,
   CreateStoreBody,
   ListObjectsBody,
@@ -403,10 +404,42 @@ export function buildApp(): Hono {
     return c.json({ objects: ids.map(id => `${body.type}:${id}`) })
   })
 
+  // ─── Batch check ────────────────────────────────────────────────
+  app.post('/stores/:storeId/batch-check', validate('json', BatchCheckBody), async (c) => {
+    const storeId = c.req.param('storeId')
+    const body = c.req.valid('json')
+    const ctx = await loadModelIndex(storeId, body.authorization_model_id)
+    if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
+
+    const result: Record<string, { allowed?: boolean, error?: { internal_error: string } }> = {}
+    for (const item of body.checks) {
+      const store = withContextualTuples(pgTupleStore(storeId), item.contextual_tuples?.tuple_keys)
+      try {
+        const allowed = await check(
+          ctx.index,
+          store,
+          item.tuple_key.user,
+          item.tuple_key.relation,
+          item.tuple_key.object,
+        )
+        result[item.correlation_id] = { allowed }
+      }
+      catch (err) {
+        // Per-item errors do not fail the whole batch — clients receive
+        // the success/failure of each item by correlation_id. Shape
+        // errors (malformed tuple_key, bad correlation_id) are caught
+        // at the validation boundary before this handler runs.
+        result[item.correlation_id] = {
+          error: { internal_error: err instanceof Error ? err.message : 'check failed' },
+        }
+      }
+    }
+    return c.json({ result })
+  })
+
   // ─── Not implemented ────────────────────────────────────────────
   for (const path of [
     '/stores/:storeId/expand',
-    '/stores/:storeId/batch-check',
     '/stores/:storeId/list-users',
     '/stores/:storeId/assertions',
   ] as const) {
