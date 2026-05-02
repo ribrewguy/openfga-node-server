@@ -16,12 +16,9 @@
  *   POST   /stores/:storeId/batch-check
  *   POST   /stores/:storeId/expand
  *   POST   /stores/:storeId/list-users
- *
- * Endpoints NOT implemented (return 501):
- *
- *   POST   /stores/:storeId/list-users
- *   POST   /stores/:storeId/assertions
  *   GET    /stores/:storeId/changes
+ *   GET    /stores/:storeId/assertions/:authorizationModelId
+ *   PUT    /stores/:storeId/assertions/:authorizationModelId
  *
  * The wire format must match `@openfga/sdk` byte-for-byte. The SDK
  * snake_cases everything, so the bodies and responses here do too.
@@ -31,6 +28,7 @@ import type { AuthorizationModel } from '@openfga/sdk'
 import { transformer, errors as transformerErrors } from '@openfga/syntax-transformer'
 import { createStore, listStoresPage } from '../storage/stores'
 import { listChangesPage } from '../storage/tuples'
+import { getAssertions, writeAssertions } from '../storage/assertions'
 import {
   getAuthorizationModel,
   listAuthorizationModels,
@@ -67,6 +65,7 @@ import {
   ListUsersBody,
   PageSizeQuery,
   ReadBody,
+  WriteAssertionsBody,
   WriteAuthorizationModelBody,
   WriteBody,
 } from './schemas'
@@ -530,12 +529,37 @@ export function buildApp(): Hono {
     return c.json({ result })
   })
 
-  // ─── Not implemented ────────────────────────────────────────────
-  for (const path of [
-    '/stores/:storeId/assertions',
-  ] as const) {
-    app.post(path, c => c.json({ code: 'not_implemented', message: `${path} is not implemented` }, 501))
-  }
+  // ─── Assertions ─────────────────────────────────────────────────
+  app.get('/stores/:storeId/assertions/:authorizationModelId', async (c) => {
+    const storeId = c.req.param('storeId')
+    const authorizationModelId = c.req.param('authorizationModelId')
+    // Validate the model pin exists; the SDK expects 404 when an
+    // unknown model is referenced rather than a silently-empty
+    // response. getAuthorizationModel scopes by store too, so a
+    // mismatched store-id surfaces as 404 here.
+    const model = await getAuthorizationModel(storeId, authorizationModelId)
+    if (!model) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
+
+    const assertions = await getAssertions(storeId, authorizationModelId)
+    return c.json({ authorization_model_id: authorizationModelId, assertions })
+  })
+
+  app.put(
+    '/stores/:storeId/assertions/:authorizationModelId',
+    validate('json', WriteAssertionsBody),
+    async (c) => {
+      const storeId = c.req.param('storeId')
+      const authorizationModelId = c.req.param('authorizationModelId')
+      const model = await getAuthorizationModel(storeId, authorizationModelId)
+      if (!model) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
+
+      const body = c.req.valid('json')
+      await writeAssertions(storeId, authorizationModelId, body.assertions)
+      // OpenFGA returns 204 No Content on a successful PUT. Hono's
+      // c.body(null, 204) sends an empty body with the status.
+      return c.body(null, 204)
+    },
+  )
   // ─── Changes ────────────────────────────────────────────────────
   app.get('/stores/:storeId/changes', validate('query', ChangesQuery), async (c) => {
     const storeId = c.req.param('storeId')
