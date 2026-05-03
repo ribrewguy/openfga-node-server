@@ -135,14 +135,16 @@ jobs:
           retention-days: 14
 
       # Publish the lcov to Codecov so the README badge has a live
-      # source. The repo must be authorized once at codecov.io (the
-      # tokenless flow works for public repos under the Codecov GitHub
-      # app — no CI secret required). Skipped on PRs from forks since
-      # those don't have access to the upload context.
+      # source. CODECOV_TOKEN is required even for public repos —
+      # Codecov's tokenless flow now rejects uploads with
+      # "Token required - not valid tokenless upload". Skipped on
+      # PRs from forks because GITHUB_TOKEN-scoped secrets are not
+      # exposed to fork runs.
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && github.event.pull_request.head.repo.fork != true }}
         uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
           flags: full
           fail_ci_if_error: false
