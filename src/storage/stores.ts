@@ -11,6 +11,7 @@
  */
 import { sql } from 'kysely'
 import { getDb, getDialect } from './db'
+import { dialectTimestampParam } from './dialect'
 import { generateId } from './ids'
 
 export interface StoreRow {
@@ -81,11 +82,11 @@ export interface ListStoresPage {
  * pages. The +1 fetch trick lets us decide "is there a next page"
  * without a separate COUNT query.
  *
- * The Postgres path keeps the explicit `::timestamptz` cast on the
- * cursor parameter so the row-tuple comparison resolves the
- * parameter type unambiguously (matches the original openfga-7ct
- * behavior). SQLite has no `::timestamptz` syntax — strings compare
- * lexicographically in our fixed-width ISO-8601 format.
+ * The cursor parameter's `::timestamptz` cast (Postgres only) is
+ * provided by `dialectTimestampParam` so the row-tuple comparison
+ * resolves unambiguously on Postgres (matches the openfga-7ct
+ * original) while SQLite emits the bare parameter (strings compare
+ * lexicographically in our fixed-width ISO-8601 format).
  */
 export async function listStoresPage(
   pageSize: number,
@@ -100,9 +101,8 @@ export async function listStoresPage(
     .limit(pageSize + 1)
 
   if (cursor) {
-    query = getDialect() === 'postgres'
-      ? query.where(sql<boolean>`(created_at, id) < (${cursor.created_at}::timestamptz, ${cursor.id})`)
-      : query.where(sql<boolean>`(created_at, id) < (${cursor.created_at}, ${cursor.id})`)
+    const ts = dialectTimestampParam(getDialect(), cursor.created_at)
+    query = query.where(sql<boolean>`(created_at, id) < (${ts}, ${cursor.id})`)
   }
 
   const rows = await query.execute()

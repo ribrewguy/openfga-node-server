@@ -32,6 +32,28 @@ import {
   writeAuthorizationModel,
 } from '../../src/storage/authorization-models'
 
+/**
+ * Stamp `created_at` on a row to a known ISO-8601 value so ordering
+ * assertions are deterministic without relying on wall-clock spacing.
+ * Tests use this to space inserts on a synthetic timeline (e.g.
+ * `2026-01-01T00:00:00.001Z`, `…002Z`, `…003Z`) instead of
+ * `setTimeout` between insertions.
+ */
+async function stampCreatedAt(table: 'openfga_store' | 'openfga_authorization_model', id: string, ts: string): Promise<void> {
+  if (table === 'openfga_store') {
+    await sql`update openfga_store set created_at = ${ts}, updated_at = ${ts} where id = ${id}`.execute(getDb())
+  }
+  else {
+    await sql`update openfga_authorization_model set created_at = ${ts} where id = ${id}`.execute(getDb())
+  }
+}
+
+function syntheticTs(i: number): string {
+  // Pad to 3-digit ms so lexicographic comparison on the full
+  // ISO-8601 string sorts numerically.
+  return `2026-01-01T00:00:00.${String(i).padStart(3, '0')}Z`
+}
+
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
 
@@ -100,19 +122,19 @@ describe('stores (Kysely port)', () => {
   })
 
   it('findStoreByName returns the most recent live row', async () => {
-    await createStore('dup')
-    // Sleep to ensure created_at differs (SQLite strftime sub-second
-    // resolution is finite; bump by 1ms for the second insert).
-    await new Promise(r => setTimeout(r, 5))
+    const first = await createStore('dup')
+    await stampCreatedAt('openfga_store', first.id, syntheticTs(1))
     const second = await createStore('dup')
+    await stampCreatedAt('openfga_store', second.id, syntheticTs(2))
     const found = await findStoreByName('dup')
     expect(found?.id).toBe(second.id)
   })
 
   it('listStores returns oldest-first', async () => {
     const a = await createStore('a')
-    await new Promise(r => setTimeout(r, 5))
+    await stampCreatedAt('openfga_store', a.id, syntheticTs(1))
     const b = await createStore('b')
+    await stampCreatedAt('openfga_store', b.id, syntheticTs(2))
     const list = await listStores()
     expect(list.map(s => s.id)).toEqual([a.id, b.id])
   })
@@ -120,8 +142,9 @@ describe('stores (Kysely port)', () => {
   it('listStoresPage cursor-walks newest-first to terminal page', async () => {
     const created: string[] = []
     for (let i = 0; i < 5; i++) {
-      created.push((await createStore(`s${i}`)).id)
-      await new Promise(r => setTimeout(r, 2))
+      const row = await createStore(`s${i}`)
+      await stampCreatedAt('openfga_store', row.id, syntheticTs(i + 1))
+      created.push(row.id)
     }
     const seen: string[] = []
     let cursor: { created_at: string, id: string } | null = null
@@ -172,15 +195,16 @@ describe('authorization_model (Kysely port)', () => {
 
   it('getLatestAuthorizationModel returns the most recently written model', async () => {
     const storeId = await makeStore()
-    await writeAuthorizationModel(storeId, {
+    const first = await writeAuthorizationModel(storeId, {
       schema_version: '1.1',
       type_definitions: [{ type: 'user' }],
     })
-    await new Promise(r => setTimeout(r, 5))
+    await stampCreatedAt('openfga_authorization_model', first.id, syntheticTs(1))
     const second = await writeAuthorizationModel(storeId, {
       schema_version: '1.1',
       type_definitions: [{ type: 'user' }, { type: 'doc' }],
     })
+    await stampCreatedAt('openfga_authorization_model', second.id, syntheticTs(2))
     const latest = await getLatestAuthorizationModel(storeId)
     expect(latest?.id).toBe(second.id)
     expect(latest?.type_definitions).toHaveLength(2)
@@ -190,11 +214,12 @@ describe('authorization_model (Kysely port)', () => {
     const storeId = await makeStore()
     const ids: string[] = []
     for (let i = 0; i < 4; i++) {
-      ids.push((await writeAuthorizationModel(storeId, {
+      const row = await writeAuthorizationModel(storeId, {
         schema_version: '1.1',
         type_definitions: [{ type: `t${i}` }],
-      })).id)
-      await new Promise(r => setTimeout(r, 2))
+      })
+      await stampCreatedAt('openfga_authorization_model', row.id, syntheticTs(i + 1))
+      ids.push(row.id)
     }
     const page = await listAuthorizationModels(storeId, 2)
     // DESC by created_at — last two written come first.

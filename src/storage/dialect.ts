@@ -71,3 +71,22 @@ export function dialectNowMinus(dialect: DialectName, ms: number): RawBuilder<st
   }
   return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms} milliseconds`})`
 }
+
+/**
+ * Render a timestamp string parameter with a Postgres `::timestamptz`
+ * cast when targeting Postgres, or as a bare parameter on SQLite. Used
+ * inside row-tuple cursor comparisons like
+ * `(created_at, id) < (${dialectTimestampParam(d, c.created_at)}, ${c.id})`
+ * so the row-tuple parameter type is unambiguous on Postgres while
+ * SQLite's lexicographic text comparison works without the cast.
+ *
+ * Centralized so subsequent storage-module ports (tuples,
+ * tuple_change) reuse the same dialect-branching logic instead of
+ * each duplicating the inline branch.
+ */
+export function dialectTimestampParam(dialect: DialectName, value: string): RawBuilder<string> {
+  if (dialect === 'postgres') {
+    return sql<string>`${value}::timestamptz`
+  }
+  return sql<string>`${value}`
+}

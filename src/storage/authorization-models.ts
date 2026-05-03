@@ -13,8 +13,10 @@
  * on select; SQLite parses via `ParseJSONResultsPlugin` registered
  * by `getDb()`.
  */
+import type { Selectable } from 'kysely'
 import type { AuthorizationModel, TypeDefinition, Condition } from '@openfga/sdk'
 import { getDb } from './db'
+import type { AuthorizationModelTable } from './db-schema'
 import { generateId } from './ids'
 
 /**
@@ -32,19 +34,11 @@ export interface AuthorizationModelRow {
   created_at: string
 }
 
-interface ParsedModel {
-  schema_version?: string
-  type_definitions?: TypeDefinition[]
-  conditions?: { [k: string]: Condition }
-}
-
-interface RawRow {
-  id: string
-  store_id: string
-  schema_version: string
-  model: ParsedModel
-  created_at: string
-}
+// `Selectable<AuthorizationModelTable>` is Kysely's "row as returned
+// by a SELECT" view of the table — `Generated<T>` columns become `T`,
+// `JSONColumnType<T>` becomes the parsed `T`. Reusing this type keeps
+// the parsed-model shape declared exactly once (in db-schema.ts).
+type RawRow = Selectable<AuthorizationModelTable>
 
 function rowToModel(raw: RawRow): AuthorizationModelRow {
   return {
@@ -70,9 +64,13 @@ export async function writeAuthorizationModel(
       id,
       store_id: storeId,
       schema_version: model.schema_version ?? '1.1',
-      // JSONColumnType<T> insert type is `string` — Kysely sends the
-      // value as-is to the driver, which writes to a jsonb column on
-      // Postgres or a TEXT column on SQLite.
+      // JSONColumnType<T> declares the insert type as `string` — the
+      // caller is responsible for stringifying. Kysely sends the
+      // string as-is to the driver, which Postgres parses into jsonb
+      // (column type does the work) and SQLite stores as TEXT (the
+      // ParseJSONResultsPlugin parses it back on read). When openfga-19w
+      // ports assertions, consider extracting a `jsonInsert<T>(value)`
+      // helper if a third JSON-column INSERT shows up.
       model: JSON.stringify(model),
     })
     .returning(MODEL_COLUMNS)
