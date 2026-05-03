@@ -3,8 +3,14 @@
  *
  * Stores are namespaces for tuples and authorization-model versions.
  * One store per environment is the typical shape.
+ *
+ * Routes through Kysely via `getDb()` (openfga-n0m). The namespace
+ * `OPENFGA_DB_NAMESPACE` is applied at the Kysely-instance level —
+ * Postgres queries emit as `<namespace>.store`, SQLite as
+ * `<namespace>_store` — so the table reference here stays logical.
  */
-import { getPool } from './pool'
+import { sql } from 'kysely'
+import { getDb, getDialect } from './db'
 import { generateId } from './ids'
 
 export interface StoreRow {
@@ -15,51 +21,46 @@ export interface StoreRow {
   deleted_at: string | null
 }
 
+const STORE_COLUMNS = ['id', 'name', 'created_at', 'updated_at', 'deleted_at'] as const
+
 export async function createStore(name: string): Promise<StoreRow> {
   const id = generateId()
-  const pool = getPool()
-  const { rows } = await pool.query<StoreRow>(
-    `INSERT INTO openfga.store (id, name)
-     VALUES ($1, $2)
-     RETURNING id, name, created_at, updated_at, deleted_at`,
-    [id, name],
-  )
-  return rows[0]!
+  return await getDb()
+    .insertInto('store')
+    .values({ id, name })
+    .returning(STORE_COLUMNS)
+    .executeTakeFirstOrThrow()
 }
 
 export async function getStore(id: string): Promise<StoreRow | null> {
-  const pool = getPool()
-  const { rows } = await pool.query<StoreRow>(
-    `SELECT id, name, created_at, updated_at, deleted_at
-       FROM openfga.store
-      WHERE id = $1 AND deleted_at IS NULL`,
-    [id],
-  )
-  return rows[0] ?? null
+  const row = await getDb()
+    .selectFrom('store')
+    .select(STORE_COLUMNS)
+    .where('id', '=', id)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst()
+  return row ?? null
 }
 
 export async function findStoreByName(name: string): Promise<StoreRow | null> {
-  const pool = getPool()
-  const { rows } = await pool.query<StoreRow>(
-    `SELECT id, name, created_at, updated_at, deleted_at
-       FROM openfga.store
-      WHERE name = $1 AND deleted_at IS NULL
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [name],
-  )
-  return rows[0] ?? null
+  const row = await getDb()
+    .selectFrom('store')
+    .select(STORE_COLUMNS)
+    .where('name', '=', name)
+    .where('deleted_at', 'is', null)
+    .orderBy('created_at', 'desc')
+    .limit(1)
+    .executeTakeFirst()
+  return row ?? null
 }
 
 export async function listStores(): Promise<StoreRow[]> {
-  const pool = getPool()
-  const { rows } = await pool.query<StoreRow>(
-    `SELECT id, name, created_at, updated_at, deleted_at
-       FROM openfga.store
-      WHERE deleted_at IS NULL
-      ORDER BY created_at ASC`,
-  )
-  return rows
+  return getDb()
+    .selectFrom('store')
+    .select(STORE_COLUMNS)
+    .where('deleted_at', 'is', null)
+    .orderBy('created_at', 'asc')
+    .execute()
 }
 
 export interface ListStoresPage {
@@ -79,22 +80,32 @@ export interface ListStoresPage {
  * the table while a client is paging does not shift previously-seen
  * pages. The +1 fetch trick lets us decide "is there a next page"
  * without a separate COUNT query.
+ *
+ * The Postgres path keeps the explicit `::timestamptz` cast on the
+ * cursor parameter so the row-tuple comparison resolves the
+ * parameter type unambiguously (matches the original openfga-7ct
+ * behavior). SQLite has no `::timestamptz` syntax — strings compare
+ * lexicographically in our fixed-width ISO-8601 format.
  */
 export async function listStoresPage(
   pageSize: number,
   cursor: { created_at: string, id: string } | null,
 ): Promise<ListStoresPage> {
-  const pool = getPool()
-  const { rows } = await pool.query<StoreRow>(
-    `SELECT id, name, created_at, updated_at, deleted_at
-       FROM openfga.store
-      WHERE deleted_at IS NULL
-        AND ($1::timestamptz IS NULL
-             OR (created_at, id) < ($1::timestamptz, $2::text))
-      ORDER BY created_at DESC, id DESC
-      LIMIT $3`,
-    [cursor?.created_at ?? null, cursor?.id ?? null, pageSize + 1],
-  )
+  let query = getDb()
+    .selectFrom('store')
+    .select(STORE_COLUMNS)
+    .where('deleted_at', 'is', null)
+    .orderBy('created_at', 'desc')
+    .orderBy('id', 'desc')
+    .limit(pageSize + 1)
+
+  if (cursor) {
+    query = getDialect() === 'postgres'
+      ? query.where(sql<boolean>`(created_at, id) < (${cursor.created_at}::timestamptz, ${cursor.id})`)
+      : query.where(sql<boolean>`(created_at, id) < (${cursor.created_at}, ${cursor.id})`)
+  }
+
+  const rows = await query.execute()
   if (rows.length <= pageSize) {
     return { rows, nextCursor: null }
   }
