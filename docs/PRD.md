@@ -101,16 +101,29 @@ intersections and differences.
 
 ### Storage
 
-Postgres schema named `openfga`. Tables: `store`,
-`authorization_model`, `tuple`. Composite primary key on `tuple`
-serves as natural deduplication. Indexes on
+The storage layer is engine-agnostic, routed through Kysely. Two
+backends are supported and selected by the scheme of `OPENFGA_DB_URL`:
+
+- **Postgres** (`postgres://` / `postgresql://`) — production-
+  recommended. Tables live under the configured namespace
+  (`OPENFGA_DB_NAMESPACE`, default `openfga`) which is realized as a
+  Postgres schema. RLS is enabled with no policies — direct queries
+  from a non-service role are blocked at the database, on top of the
+  application-level boundary discipline.
+- **SQLite** (`sqlite:` / `file:` / `:memory:`) — test backend and
+  embedded-deployment option. Tables live under the configured
+  namespace which is realized as a table-name prefix (e.g.
+  `openfga_store`). RLS is unavailable; concurrency is single-writer.
+
+Tables: `store`, `authorization_model`, `tuple`. Composite primary
+key on `tuple` serves as natural deduplication. Indexes on
 `(store_id, user_str, relation)` and
 `(store_id, object_type, relation, user_str)` cover the two read
 patterns the evaluator uses.
 
-RLS is enabled with no policies — direct queries from a non-service
-role are blocked at the database, on top of the application-level
-boundary discipline.
+The full architectural decisions, dialect-portability hot spots, and
+phasing are in
+[`docs/features/db-agnosticism.md`](features/db-agnosticism.md).
 
 ### API caller authentication
 
@@ -134,12 +147,15 @@ failures, or ambiguous connection resets.
 
 Idempotency is enforced at the HTTP middleware boundary for configured
 mutating endpoints. It must not change successful OpenFGA response
-shapes. Idempotency persistence lives in the `openfga` schema for
-operational simplicity; the schema-compatible migration path to
-upstream OpenFGA is preserved by excluding the idempotency table at
-dump time
-(`pg_dump --schema=openfga --exclude-table='openfga.idempotency_keys'`),
-which operators run when cutting over.
+shapes. Idempotency persistence lives alongside the OpenFGA tables in
+the configured namespace (`OPENFGA_DB_NAMESPACE`, default `openfga`)
+for operational simplicity. None of the operational tables —
+`idempotency_keys`, `tuple_change`, `assertions` — nor the Kysely
+Migrator's tracking tables (`kysely_migration`,
+`kysely_migration_lock`) are part of the OpenFGA-compatible state
+contract; the schema-compatible migration path to upstream OpenFGA is
+preserved by excluding all five at dump time. See §Migration path
+FROM this server TO upstream OpenFGA for the full recipe.
 
 ### OpenTelemetry observability
 
@@ -155,15 +171,18 @@ OpenTelemetry settings through environment variables.
 
 ## Operational shape
 
-- Single Node process. No external service dependencies beyond
-  Postgres.
-- Connects as a service-role / superuser to bypass RLS. Other
-  applications sharing the same Postgres instance must use a
-  different role.
-- Connection pooling via `pg.Pool` with conservative defaults
-  (max 10, idle timeout 30s).
-- Stateless above the database — horizontal scaling works without
-  coordination.
+- Single Node process. No external service dependencies beyond the
+  configured database (Postgres or SQLite).
+- **Postgres backend**: connects as a service-role / superuser to
+  bypass RLS. Other applications sharing the same Postgres instance
+  must use a different role. Connection pooling via `pg.Pool` with
+  conservative defaults (max 10, idle timeout 30s). Stateless above
+  the database — horizontal scaling works without coordination.
+- **SQLite backend**: single-process, single-writer. WAL journal mode
+  is enabled by default for non-`:memory:` paths. Suitable for tests,
+  embedded deployments, and small single-node SaaS; not for
+  multi-instance production. The pool-tuning environment variables
+  are ignored on this backend. Horizontal scaling is not available.
 
 ## Migration path FROM this server TO upstream OpenFGA
 
@@ -172,12 +191,29 @@ operational maturity, or a need for the not-yet-implemented
 endpoints):
 
 1. Provision an upstream OpenFGA Go server with a Postgres datastore.
-2. `pg_dump --schema=openfga` from this server's database, restore
-   into the new datastore.
+2. `pg_dump` from this server's database, excluding the operational
+   and Migrator-tracking tables that aren't part of the OpenFGA
+   reference contract (substitute the configured namespace; default
+   is `openfga`):
+
+   ```sh
+   pg_dump --schema=<namespace> \
+           --exclude-table='<namespace>.idempotency_keys' \
+           --exclude-table='<namespace>.tuple_change' \
+           --exclude-table='<namespace>.assertions' \
+           --exclude-table='<namespace>.kysely_migration' \
+           --exclude-table='<namespace>.kysely_migration_lock'
+   ```
+
+   Restore the dump into the new datastore.
 3. Update the new OpenFGA server's `--datastore-uri`.
 4. Flip `OPENFGA_API_URL` on consuming applications.
 
 No application code changes. No SDK changes. No model changes.
+
+This path is **Postgres-only** — operators running the SQLite backend
+must first migrate to Postgres (manual data export / re-import via
+the application's read/write APIs) before this recipe applies.
 
 ## Future scope (non-binding)
 

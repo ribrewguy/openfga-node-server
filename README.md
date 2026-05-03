@@ -6,13 +6,25 @@ OpenFGA reference (Go) server for the surface this project implements.
 Built to fill a gap: serverless-friendly Node deployments (Vercel, Fly,
 Cloud Run, etc.) often can't run the Go binary as a sidecar, and the
 managed offerings (Auth0 FGA / openfga.cloud) aren't always the right
-shape. This server runs anywhere Node runs, talks the OpenFGA HTTP
-protocol byte-for-byte, and stores state in Postgres in a schema that
-mirrors the upstream's reference schema — so a future migration to the
-Go server is `pg_dump --schema=openfga` (excluding three operational
-tables that aren't part of the OpenFGA reference contract; see
-[Migrating to upstream OpenFGA](#migrating-to-upstream-openfga))
-plus an env-var flip.
+shape. This server runs anywhere Node runs and talks the OpenFGA HTTP
+protocol byte-for-byte.
+
+State is stored via a Kysely-typed storage layer with two supported
+backends:
+
+- **Postgres** (production-recommended) — schema mirrors the upstream
+  OpenFGA reference schema, so a future migration to the Go server is
+  `pg_dump --schema=openfga` (excluding the operational tables that
+  aren't part of the OpenFGA reference contract; see
+  [Migrating to upstream OpenFGA](#migrating-to-upstream-openfga))
+  plus an env-var flip.
+- **SQLite** (test backend; embedded-deployment option) — for unit
+  tests, single-process embedded use, and small SaaS deployments
+  where Postgres is overkill. The upstream-migration `pg_dump` path
+  is not available on this backend.
+
+The backend is selected from the scheme of `OPENFGA_DB_URL`; no
+separate driver flag.
 
 ## Status
 
@@ -139,8 +151,10 @@ Replay semantics, within `OPENFGA_IDEMPOTENCY_TTL_MS` (default 24 h):
 | Same key, different request body | `422 idempotency_fingerprint_mismatch`. |
 | Idempotency store unavailable | `503 idempotency_store_unavailable`. |
 
-Idempotency state lives in `openfga.idempotency_keys`. It is **not**
-part of the OpenFGA-compatible state contract — see
+Idempotency state lives in `<namespace>.idempotency_keys` (where
+`<namespace>` is the value of `OPENFGA_DB_NAMESPACE`, default
+`openfga`). It is **not** part of the OpenFGA-compatible state
+contract — see
 [Migrating to upstream OpenFGA](#migrating-to-upstream-openfga) for
 the full exclude list.
 
@@ -149,32 +163,43 @@ for the full specification.
 
 ## Migrating to upstream OpenFGA
 
-The `openfga` schema mirrors the upstream OpenFGA reference schema for
-the tables that ARE part of the wire contract (`store`,
-`authorization_model`, `tuple`). Three additional tables back this
-server's operational features and are NOT part of the reference
-contract:
+This path is **Postgres-only** — SQLite has no `pg_dump` analog. If
+you're running the SQLite backend and want to move to the upstream Go
+server, you'll need to bring up a Postgres backend on this server
+first, then follow this recipe.
+
+The configured namespace (default `openfga`) mirrors the upstream
+OpenFGA reference schema for the tables that ARE part of the wire
+contract (`store`, `authorization_model`, `tuple`). Three additional
+tables back this server's operational features and are NOT part of
+the reference contract; the Kysely Migrator's two tracking tables are
+also excluded since they're not OpenFGA state:
 
 | Table | Backs |
 |---|---|
-| `openfga.idempotency_keys` | `Idempotency-Key` HTTP header (see [Idempotency keys](#idempotency-keys)) |
-| `openfga.tuple_change` | `GET /stores/:storeId/changes` changelog with deterministic per-insertion ordering |
-| `openfga.assertions` | `GET/PUT /stores/:storeId/assertions/:authorizationModelId` |
+| `<namespace>.idempotency_keys` | `Idempotency-Key` HTTP header (see [Idempotency keys](#idempotency-keys)) |
+| `<namespace>.tuple_change` | `GET /stores/:storeId/changes` changelog with deterministic per-insertion ordering |
+| `<namespace>.assertions` | `GET/PUT /stores/:storeId/assertions/:authorizationModelId` |
+| `<namespace>.kysely_migration` | Kysely Migrator's applied-migrations tracking |
+| `<namespace>.kysely_migration_lock` | Kysely Migrator's advisory-lock row |
 
-When migrating to the upstream OpenFGA Go server, exclude all three
-tables from the dump:
+When migrating to the upstream OpenFGA Go server, exclude all five
+tables from the dump (substitute your configured namespace for
+`<namespace>`; the default is `openfga`):
 
 ```sh
-pg_dump --schema=openfga \
-        --exclude-table='openfga.idempotency_keys' \
-        --exclude-table='openfga.tuple_change' \
-        --exclude-table='openfga.assertions'
+pg_dump --schema=<namespace> \
+        --exclude-table='<namespace>.idempotency_keys' \
+        --exclude-table='<namespace>.tuple_change' \
+        --exclude-table='<namespace>.assertions' \
+        --exclude-table='<namespace>.kysely_migration' \
+        --exclude-table='<namespace>.kysely_migration_lock'
 ```
 
 The migration files for each operational table document the same
-recipe inline — see `migrations/1777824000000_idempotency-keys.sql`,
-`migrations/1777910400000_tuple-changes.sql`, and
-`migrations/1777996800000_assertions.sql`.
+recipe inline — see `migrations/1777824000000_idempotency-keys.ts`,
+`migrations/1777910400000_tuple-changes.ts`, and
+`migrations/1777996800000_assertions.ts`.
 
 ## Status: tradeoffs of the current implementation
 
