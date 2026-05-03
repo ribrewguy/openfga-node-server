@@ -42,7 +42,13 @@ jobs:
       - run: pnpm build
 
   test-unit:
-    name: Unit tests
+    # Unit tests run against in-memory SQLite. The native
+    # better-sqlite3 module compiles during pnpm install — package.json
+    # opts it into pnpm.onlyBuiltDependencies so the build runs even
+    # under --frozen-lockfile. vitest.config.ts pins
+    # OPENFGA_DB_URL=:memory: at the unit project level (since
+    # openfga-yg9), so this job needs no Postgres service.
+    name: Unit tests (SQLite)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -59,6 +65,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm test:unit
+
+      # End-to-end smoke of the migrate CLI against an on-disk SQLite
+      # file. The unit suite exercises the Migrator on :memory: via
+      # the bootstrap helper; this step catches issues that only show
+      # up against a file-backed database (WAL journal mode, fsync
+      # interactions, file-permission edge cases).
+      - name: Smoke-test migrate CLI on SQLite
+        env:
+          OPENFGA_DB_URL: sqlite:./ci-smoke.db
+        run: |
+          set -euo pipefail
+          rm -f ./ci-smoke.db
+          pnpm migrate up
+          pnpm migrate down
+          pnpm migrate down
+          rm -f ./ci-smoke.db ./ci-smoke.db-shm ./ci-smoke.db-wal ./ci-smoke.db-journal
 
   test-coverage:
     name: Tests + coverage
