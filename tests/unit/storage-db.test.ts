@@ -229,10 +229,13 @@ describe('dialectNowMinus', () => {
     expect(parameters).toEqual([60_000])
   })
 
-  it('emits SQLite strftime with parameterized negative-milliseconds modifier', () => {
+  it('emits SQLite strftime with parameterized fractional-seconds modifier', () => {
+    // SQLite has no `milliseconds` modifier — passing one returns
+    // NULL silently. dialectNowMinus emits ms/1000 as fractional
+    // seconds; openfga-8ys investigation pinned this down.
     const { sql: sqlText, parameters } = compileWith('sqlite', 60_000)
     expect(sqlText).toMatch(/strftime\('%Y-%m-%dT%H:%M:%fZ',\s*'now',\s*\$\d+\)/i)
-    expect(parameters).toEqual(['-60000 milliseconds'])
+    expect(parameters).toEqual(['-60.000 seconds'])
   })
 })
 
