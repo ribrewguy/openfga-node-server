@@ -16,7 +16,7 @@
 import { describe, it, expect, afterAll, beforeEach } from 'vitest'
 import { Pool } from 'pg'
 import { claimKey, completeKey, releaseKey } from '../../src/storage/idempotency'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
 
@@ -42,7 +42,7 @@ if (!dbAvailable) {
 }
 
 afterAll(() => {
-  if (dbAvailable) resetPool()
+  if (dbAvailable) resetDb()
 })
 
 const describeIfDb = dbAvailable ? describe : describe.skip

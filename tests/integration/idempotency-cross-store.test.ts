@@ -22,7 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 import type { Hono } from 'hono'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
@@ -64,7 +64,7 @@ describeIfDb('openfga-fot regression — cross-store idempotency on /authorizati
   afterAll(() => {
     if (previousMode === undefined) delete process.env['OPENFGA_IDEMPOTENCY_MODE']
     else process.env['OPENFGA_IDEMPOTENCY_MODE'] = previousMode
-    resetPool()
+    resetDb()
   })
 
   function writeModelReq(storeId: string, body: unknown, idempotencyKey: string): Request {

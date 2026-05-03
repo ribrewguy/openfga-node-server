@@ -20,13 +20,10 @@
  * The Database type uses logical (unqualified) table names so
  * application code stays engine-neutral.
  *
- * `pool.ts` (legacy `pg.Pool` getter) is intentionally NOT touched in
- * this bead. Storage modules under `src/storage/*` continue to use
- * `getPool()`; they migrate to `getDb()` in subsequent children of
- * the openfga-8ri epic (n0m, 6tv, 19w). When the last consumer of
- * `pool.ts` switches over, `pool.ts` is deleted and the pg type-parser
- * setup that currently lives there becomes the responsibility of
- * `getPgPool()` in this module exclusively.
+ * `pool.ts` (the legacy `pg.Pool` getter) was deleted under
+ * openfga-19w once every storage module migrated through getDb().
+ * The pg type-parser setup and `intFromEnv` helper now live in
+ * `src/storage/pg-internals.ts` as the single source of truth.
  */
 import { Kysely, ParseJSONResultsPlugin, PostgresDialect, SqliteDialect } from 'kysely'
 import { Pool } from 'pg'

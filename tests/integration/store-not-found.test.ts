@@ -12,7 +12,7 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
 const UNKNOWN_STORE_ID = '01ZZZZZZZZZZZZZZZZZZZZZZZZ'
@@ -39,7 +39,7 @@ if (!dbAvailable) {
 }
 
 afterAll(() => {
-  if (dbAvailable) resetPool()
+  if (dbAvailable) resetDb()
 })
 
 const describeIfDb = dbAvailable ? describe : describe.skip

@@ -18,7 +18,7 @@ import { Pool } from 'pg'
 import { serve, type ServerType } from '@hono/node-server'
 import { OpenFgaClient } from '@openfga/sdk'
 import { buildApp } from '../../src/routes/index'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
 
@@ -63,7 +63,7 @@ describeIfDb('@openfga/sdk conformance — OpenFgaClient against a live server',
     await new Promise<void>((resolve) => {
       server.close(() => resolve())
     })
-    resetPool()
+    resetDb()
   })
 
   function clientForStore(storeId?: string, authorizationModelId?: string): OpenFgaClient {

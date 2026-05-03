@@ -18,7 +18,7 @@ import { ModelIndex } from '../../src/evaluator/model-index'
 import { createStore } from '../../src/storage/stores'
 import { writeAuthorizationModel, getLatestAuthorizationModel } from '../../src/storage/authorization-models'
 import { writeTuples } from '../../src/storage/tuples'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 import { pgTupleStore } from '../../src/storage/engine-context'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
@@ -46,7 +46,7 @@ if (!dbAvailable) {
 }
 
 afterAll(() => {
-  if (dbAvailable) resetPool()
+  if (dbAvailable) resetDb()
 })
 
 const describeIfDb = dbAvailable ? describe : describe.skip
@@ -73,7 +73,7 @@ describeIfDb('persistence', () => {
       expect(before).toBe(true)
     }
 
-    resetPool()
+    resetDb()
 
     const latest = await getLatestAuthorizationModel(store.id)
     expect(latest).not.toBeNull()
@@ -98,7 +98,7 @@ describeIfDb('persistence', () => {
       { user: `user:${adminId}`, relation: 'admin', object: 'organization:openfga' },
     ])
 
-    resetPool()
+    resetDb()
 
     const latest = await getLatestAuthorizationModel(store.id)
     const allowed = await check(
