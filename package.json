@@ -4,10 +4,10 @@
   "private": true,
   "description": "OpenFGA-wire-compatible authorization server in Node. Drop-in for the OpenFGA reference (Go) server for the surface this project implements.",
   "type": "module",
-  "main": "dist/index.mjs",
+  "main": "dist/server.mjs",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.mjs",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.mjs",
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src tests",
