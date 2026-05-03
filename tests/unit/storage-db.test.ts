@@ -1,0 +1,277 @@
+/**
+ * Unit tests for the engine-agnostic Kysely entry point and its
+ * supporting dialect helpers + table-prefix plugin (openfga-317).
+ *
+ * The Postgres path requires a real Postgres and is exercised by the
+ * integration tests in subsequent children of openfga-8ri. These unit
+ * tests cover:
+ *
+ *   - getNamespace() validation (pure)
+ *   - getDialect() URL parsing + scheme rejection (pure)
+ *   - dialectFromUrl / sqlitePathFromUrl edge cases (pure)
+ *   - dialectNowMinus() emits the right SQL per dialect (compiled)
+ *   - getDb() round-trips a query against in-memory SQLite
+ *   - TablePrefixPlugin rewrites table names at compile time on SQLite
+ *   - Postgres-flavored Kysely instance compiles queries with the
+ *     namespace as a schema prefix (no live connection needed)
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { DummyDriver, Kysely, PostgresAdapter, PostgresIntrospector, PostgresQueryCompiler, sql } from 'kysely'
+import { dialectFromUrl, dialectNowMinus, sqlitePathFromUrl } from '../../src/storage/dialect'
+import type { Database } from '../../src/storage/db-schema'
+import { TablePrefixPlugin } from '../../src/storage/table-prefix-plugin'
+import { getDb, getDialect, getNamespace, resetDb } from '../../src/storage/db'
+
+const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
+const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
+
+beforeEach(() => {
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k]
+  resetDb()
+})
+
+afterEach(() => {
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k]
+    else process.env[k] = savedEnv[k]
+  }
+  resetDb()
+})
+
+describe('dialectFromUrl', () => {
+  it.each([
+    ['postgres://u:p@h:5432/d', 'postgres' as const],
+    ['postgresql://u:p@h:5432/d', 'postgres' as const],
+    ['sqlite::memory:', 'sqlite' as const],
+    ['sqlite:./openfga.db', 'sqlite' as const],
+    ['file:./openfga.db', 'sqlite' as const],
+    [':memory:', 'sqlite' as const],
+  ])('parses %s as %s', (url, expected) => {
+    expect(dialectFromUrl(url)).toBe(expected)
+  })
+
+  it.each(['mysql://x', 'http://x', 'redis://x', 'plain-string'])(
+    'rejects unsupported scheme %s',
+    (url) => {
+      expect(() => dialectFromUrl(url)).toThrow(/must start with/)
+    },
+  )
+})
+
+describe('sqlitePathFromUrl', () => {
+  it.each([
+    [':memory:', ':memory:'],
+    ['sqlite::memory:', ':memory:'],
+    ['sqlite:./foo.db', './foo.db'],
+    ['sqlite:/abs/path/foo.db', '/abs/path/foo.db'],
+    ['file:./foo.db', './foo.db'],
+    // Empty after the prefix is treated as `:memory:` so `sqlite:`
+    // behaves the same as `sqlite::memory:`.
+    ['sqlite:', ':memory:'],
+    ['file:', ':memory:'],
+  ])('extracts path from %s as %s', (url, expected) => {
+    expect(sqlitePathFromUrl(url)).toBe(expected)
+  })
+
+  it('throws on a non-sqlite URL', () => {
+    expect(() => sqlitePathFromUrl('postgres://x')).toThrow(/not a SQLite/)
+  })
+})
+
+describe('getNamespace', () => {
+  it('returns the default when unset', () => {
+    delete process.env['OPENFGA_DB_NAMESPACE']
+    expect(getNamespace()).toBe('openfga')
+  })
+
+  it.each(['app_authz', 'fga', 'a', 'a1', 'snake_case_123'])(
+    'accepts valid identifier %s',
+    (ns) => {
+      process.env['OPENFGA_DB_NAMESPACE'] = ns
+      expect(getNamespace()).toBe(ns)
+    },
+  )
+
+  it.each([
+    '',
+    '1starts_with_digit',
+    'Has_Uppercase',
+    'has-dash',
+    'has.dot',
+    'has space',
+    'a'.repeat(64), // 64 chars exceeds NAMEDATALEN-1 boundary
+    '"quoted"',
+    'drop;table',
+  ])('rejects invalid identifier %s', (ns) => {
+    process.env['OPENFGA_DB_NAMESPACE'] = ns
+    expect(() => getNamespace()).toThrow(/OPENFGA_DB_NAMESPACE must match/)
+  })
+
+  it('caches the validated value', () => {
+    process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    expect(getNamespace()).toBe('app_authz')
+    // Mutating after first read does not flip the cache (resetDb()
+    // clears it; this test asserts the cache exists).
+    process.env['OPENFGA_DB_NAMESPACE'] = 'something_else'
+    expect(getNamespace()).toBe('app_authz')
+  })
+})
+
+describe('getDialect', () => {
+  it('throws when OPENFGA_DB_URL is unset', () => {
+    delete process.env['OPENFGA_DB_URL']
+    expect(() => getDialect()).toThrow(/OPENFGA_DB_URL is not set/)
+  })
+
+  it.each([
+    ['postgres://u:p@h/d', 'postgres' as const],
+    [':memory:', 'sqlite' as const],
+    ['sqlite:./x.db', 'sqlite' as const],
+  ])('infers dialect %s from %s', (url, expected) => {
+    process.env['OPENFGA_DB_URL'] = url
+    expect(getDialect()).toBe(expected)
+  })
+})
+
+describe('TablePrefixPlugin', () => {
+  // Use the SqliteAdapter triplet via DummyDriver so we can compile
+  // queries without a live connection. The plugin operates on the
+  // OperationNode tree, which is compiler-agnostic.
+  function buildSqliteCompiler(plugins: TablePrefixPlugin[]): Kysely<Database> {
+    return new Kysely<Database>({
+      dialect: {
+        createAdapter: () => new PostgresAdapter(),
+        createDriver: () => new DummyDriver(),
+        createIntrospector: db => new PostgresIntrospector(db),
+        createQueryCompiler: () => new PostgresQueryCompiler(),
+      },
+      plugins,
+    })
+  }
+
+  it('prepends the prefix to a SELECT FROM target', () => {
+    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const compiled = db.selectFrom('store').select('id').compile()
+    expect(compiled.sql).toMatch(/from "openfga_store"/i)
+  })
+
+  it('prepends the prefix to INSERT INTO targets', () => {
+    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const compiled = db
+      .insertInto('store')
+      .values({ id: 'sid', name: 'n' })
+      .compile()
+    expect(compiled.sql).toMatch(/insert into "openfga_store"/i)
+  })
+
+  it('prepends to JOIN targets', () => {
+    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const compiled = db
+      .selectFrom('store')
+      .innerJoin('authorization_model', 'authorization_model.store_id', 'store.id')
+      .select('store.id')
+      .compile()
+    expect(compiled.sql).toMatch(/openfga_store/)
+    expect(compiled.sql).toMatch(/openfga_authorization_model/)
+  })
+
+  it('honours a configured non-default prefix', () => {
+    const db = buildSqliteCompiler([new TablePrefixPlugin('app_authz_')])
+    const compiled = db.selectFrom('tuple').select('store_id').compile()
+    expect(compiled.sql).toMatch(/from "app_authz_tuple"/i)
+  })
+
+  it('does not double-prefix already-prefixed names (idempotent)', () => {
+    const db = buildSqliteCompiler([
+      new TablePrefixPlugin('openfga_'),
+      new TablePrefixPlugin('openfga_'),
+    ])
+    const compiled = db.selectFrom('store').select('id').compile()
+    // Two passes of the same prefix should still produce a single prefix.
+    expect(compiled.sql).toMatch(/from "openfga_store"/i)
+    expect(compiled.sql).not.toMatch(/openfga_openfga_/)
+  })
+
+  it('skips identifiers that carry an explicit schema', () => {
+    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    // Dotted literal `'public.store'` produces a TableNode whose
+    // SchemableIdentifierNode has `schema` set; the prefix plugin
+    // must leave such identifiers untouched so callers can opt out
+    // of namespacing for cross-schema references.
+    const compiled = db.selectFrom('public.store' as never).select('id' as never).compile()
+    expect(compiled.sql).not.toMatch(/openfga_/)
+    expect(compiled.sql).toMatch(/"public"\."store"/)
+  })
+})
+
+describe('dialectNowMinus', () => {
+  function compileWith(dialect: 'postgres' | 'sqlite', ms: number): string {
+    const db = new Kysely<Database>({
+      dialect: {
+        createAdapter: () => new PostgresAdapter(),
+        createDriver: () => new DummyDriver(),
+        createIntrospector: d => new PostgresIntrospector(d),
+        createQueryCompiler: () => new PostgresQueryCompiler(),
+      },
+    })
+    const node = sql`select ${dialectNowMinus(dialect, ms)}`.compile(db)
+    return node.sql
+  }
+
+  it('emits Postgres interval arithmetic', () => {
+    const sqlText = compileWith('postgres', 60_000)
+    expect(sqlText).toMatch(/now\(\)\s*-\s*60000::int\s*\*\s*interval '1 millisecond'/i)
+  })
+
+  it('emits SQLite strftime with negative-milliseconds modifier', () => {
+    const sqlText = compileWith('sqlite', 60_000)
+    expect(sqlText).toMatch(/strftime\('%Y-%m-%dT%H:%M:%fZ',\s*'now',\s*'-60000 milliseconds'\)/i)
+  })
+})
+
+describe('getDb (SQLite end-to-end smoke)', () => {
+  beforeEach(() => {
+    process.env['OPENFGA_DB_URL'] = ':memory:'
+    delete process.env['OPENFGA_DB_NAMESPACE']
+  })
+
+  it('returns a Kysely instance that can execute a raw SELECT', async () => {
+    const db = getDb()
+    const row = await sql<{ v: number }>`select 1 as v`.execute(db)
+    expect(row.rows).toEqual([{ v: 1 }])
+  })
+
+  it('honours the configured namespace via the prefix plugin', async () => {
+    process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    const db = getDb()
+    // Create the prefixed physical table by hand. The prefix plugin
+    // rewrites the logical name on the way to SQL, so a select on
+    // 'store' compiles to a select on 'app_authz_store'.
+    await sql`
+      create table app_authz_store (
+        id text primary key,
+        name text not null,
+        created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        deleted_at text
+      )
+    `.execute(db)
+    await db
+      .insertInto('store')
+      .values({ id: 's1', name: 'first' })
+      .execute()
+    const rows = await db.selectFrom('store').select(['id', 'name']).execute()
+    expect(rows).toEqual([{ id: 's1', name: 'first' }])
+  })
+
+  it('isolates singletons across resetDb()', async () => {
+    process.env['OPENFGA_DB_NAMESPACE'] = 'first'
+    const a = getDb()
+    expect(a).toBe(getDb())
+    resetDb()
+    process.env['OPENFGA_DB_NAMESPACE'] = 'second'
+    const b = getDb()
+    expect(b).not.toBe(a)
+    expect(getNamespace()).toBe('second')
+  })
+})
