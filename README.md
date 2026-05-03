@@ -1,5 +1,7 @@
 # openfga-node-server
 
+[![codecov](https://codecov.io/gh/ribrewguy/openfga-node-server/graph/badge.svg)](https://codecov.io/gh/ribrewguy/openfga-node-server)
+
 OpenFGA-wire-compatible authorization server in Node. Drop-in for the
 OpenFGA reference (Go) server for the surface this project implements.
 
