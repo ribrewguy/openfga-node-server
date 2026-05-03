@@ -16,7 +16,7 @@ import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
 import { writeTuples } from '../../src/storage/tuples'
 import { writeAuthorizationModel } from '../../src/storage/authorization-models'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
 
@@ -42,7 +42,7 @@ if (!dbAvailable) {
 }
 
 afterAll(() => {
-  if (dbAvailable) resetPool()
+  if (dbAvailable) resetDb()
 })
 
 const describeIfDb = dbAvailable ? describe : describe.skip

@@ -19,7 +19,7 @@ import { resolve } from 'node:path'
 import { transformer } from '@openfga/syntax-transformer'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 
 const DB_URL = process.env['OPENFGA_DB_URL']
 const MODEL_PATH = resolve(import.meta.dirname ?? '.', '..', 'fixtures', 'github.fga')
@@ -46,7 +46,7 @@ if (!dbAvailable) {
 }
 
 afterAll(() => {
-  if (dbAvailable) resetPool()
+  if (dbAvailable) resetDb()
 })
 
 const describeIfDb = dbAvailable ? describe : describe.skip
