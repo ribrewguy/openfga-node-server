@@ -1,19 +1,12 @@
 /**
- * SQLite smoke tests for the ported `stores.ts` and
- * `authorization-models.ts` modules (openfga-n0m).
+ * Unit tests for `stores.ts` and `authorization-models.ts` against
+ * in-memory SQLite. Bootstraps the schema via the Kysely Migrator
+ * (the same migration files the production CLI applies under
+ * `pnpm migrate up`), so the tests stay in sync with schema evolution.
  *
- * Comprehensive coverage of these repositories — including the
- * Postgres path and exhaustive edge cases — lands in openfga-yg9
- * (child #7) when SQLite is wired into the vitest unit project as
- * the default driver. This file is a focused smoke test that
- * exercises each function against an in-memory SQLite to catch
- * obvious port mistakes (column names, SQL syntax, where clauses)
- * locally; integration tests on real Postgres validate the production
- * path in CI.
- *
- * The migration runner (openfga-g2j, child #6) hasn't shipped yet, so
- * the test bootstraps the prefixed tables by hand — same pattern as
- * the namespace-round-trip test in `storage-db.test.ts`.
+ * Originally introduced as smoke tests under openfga-n0m when SQLite
+ * was a manual bootstrap. Promoted to migrator-backed unit tests
+ * under openfga-yg9.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { sql } from 'kysely'
@@ -31,6 +24,7 @@ import {
   listAuthorizationModels,
   writeAuthorizationModel,
 } from '../../src/storage/authorization-models'
+import { migrateToLatest } from '../_helpers/sqlite-bootstrap'
 
 /**
  * Stamp `created_at` on a row to a known ISO-8601 value so ordering
@@ -57,40 +51,15 @@ function syntheticTs(i: number): string {
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
 
-async function bootstrap(): Promise<void> {
-  // Manually create the prefixed physical tables in the SQLite
-  // in-memory DB so the ported repositories have something to talk
-  // to. The DDL mirrors `migrations/1777680000000_initial-openfga-schema.sql`
-  // adapted for SQLite syntax (TEXT instead of timestamptz; no RLS;
-  // no schema namespacing — the prefix plugin maps logical names to
-  // openfga_*).
-  const db = getDb()
-  await sql`
-    create table openfga_store (
-      id text primary key,
-      name text not null,
-      created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-      updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-      deleted_at text
-    )
-  `.execute(db)
-  await sql`
-    create table openfga_authorization_model (
-      id text primary key,
-      store_id text not null references openfga_store(id) on delete cascade,
-      schema_version text not null,
-      model text not null,
-      created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    )
-  `.execute(db)
-}
-
 beforeEach(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k]
   await resetDb()
-  process.env['OPENFGA_DB_URL'] = ':memory:'
+  // OPENFGA_DB_URL=:memory: is set by vitest.config.ts for the unit
+  // project. Ensure the namespace stays at default so the migrator's
+  // tracking tables and the ported storage modules agree on the
+  // physical table names.
   delete process.env['OPENFGA_DB_NAMESPACE']
-  await bootstrap()
+  await migrateToLatest()
 })
 
 afterEach(async () => {
