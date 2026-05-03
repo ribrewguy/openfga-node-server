@@ -118,5 +118,32 @@ export function dialectNow(dialect: DialectName): RawBuilder<string> {
   if (dialect === 'postgres') {
     return sql<string>`now()`
   }
-  return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+  // Outer parens are required when this fragment is used as a SQLite
+  // column DEFAULT — SQLite rejects non-literal defaults without them.
+  // The parens are harmless in other contexts (UPDATE … SET col = …).
+  return sql<string>`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`
+}
+
+/** Convenience guard for migrations and other callers that branch on Postgres. */
+export function isPostgres(dialect: DialectName): boolean {
+  return dialect === 'postgres'
+}
+
+/**
+ * Per-dialect column type for a wall-clock timestamp column. Postgres
+ * uses `timestamptz` natively; SQLite stores ISO-8601 text. Use as
+ * `addColumn('created_at', dialectTimestampColumn(d), col => col.notNull().defaultTo(dialectNow(d)))`.
+ */
+export function dialectTimestampColumn(dialect: DialectName): RawBuilder<string> {
+  return dialect === 'postgres' ? sql`timestamptz` : sql`text`
+}
+
+/**
+ * Per-dialect column type for a JSON-shaped column. Postgres uses
+ * `jsonb` (auto-parses on read); SQLite uses `text` (paired with the
+ * `ParseJSONResultsPlugin` registered by `getDb()` so reads return
+ * the parsed shape).
+ */
+export function dialectJsonColumn(dialect: DialectName): RawBuilder<string> {
+  return dialect === 'postgres' ? sql`jsonb` : sql`text`
 }
