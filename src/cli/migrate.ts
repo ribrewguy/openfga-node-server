@@ -29,16 +29,10 @@
  * state contract.
  */
 import 'dotenv/config'
-import { promises as fs } from 'node:fs'
-import * as path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { FileMigrationProvider, Migrator, type MigrationResultSet } from 'kysely'
+import { Migrator, type MigrationResultSet } from 'kysely'
 import { getDb, getDialect, getNamespace, resetDb } from '../storage/db'
 import { isPostgres } from '../storage/dialect'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const MIGRATION_FOLDER = path.resolve(__dirname, '../../migrations')
+import { StaticMigrationProvider } from './migrations-bundle'
 
 function buildMigrator() {
   const ns = getNamespace()
@@ -48,11 +42,7 @@ function buildMigrator() {
   const migrationLockTableName = isPostgres(dialect) ? 'kysely_migration_lock' : `${ns}_kysely_migration_lock`
   return new Migrator({
     db,
-    provider: new FileMigrationProvider({
-      fs,
-      path,
-      migrationFolder: MIGRATION_FOLDER,
-    }),
+    provider: new StaticMigrationProvider(),
     migrationTableName,
     migrationLockTableName,
     ...(isPostgres(dialect) ? { migrationTableSchema: ns } : {}),

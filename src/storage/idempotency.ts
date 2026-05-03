@@ -25,9 +25,8 @@
  *   - `releaseKey` removes an in-flight row when the handler errored
  *     (5xx or thrown exception) so the client can retry cleanly.
  */
-import { sql, type Kysely } from 'kysely'
+import { sql } from 'kysely'
 import { getDb, getDialect } from './db'
-import type { Database } from './db-schema'
 import { dialectNow, dialectNowMinus } from './dialect'
 
 export type ClaimResult =
@@ -57,22 +56,29 @@ export async function claimKey(
   fingerprint: string,
   ttlMs: number,
 ): Promise<ClaimResult> {
-  // Scope the DELETE+INSERT+SELECT to a single connection so they
-  // share a clock and avoid extra checkout/release cycles. SQLite is
-  // single-connection so this is a no-op there; on Postgres it
-  // matches the original pool.connect() shape.
-  return await getDb().connection().execute(async (db) => {
-    return await claimWithDb(db, key, fingerprint, ttlMs)
-  })
+  // The DELETE+INSERT+SELECT runs as three separate queries against
+  // the configured Kysely instance. The original pool.connect()
+  // wrapper on the legacy pg.Pool path was a perf optimization (one
+  // checkout for three queries); we deliberately do NOT use Kysely's
+  // analogous getDb().connection().execute() here because it
+  // deadlocks under sequential claimKey() calls on the SqliteDialect
+  // (the single-connection lock isn't released cleanly between
+  // calls; see openfga-8ys investigation). The auto-checkout cost on
+  // Postgres is negligible compared to the correctness win on
+  // SQLite. ON CONFLICT DO NOTHING is row-atomic at the engine
+  // level, so no wrapping transaction is needed for the three-step
+  // protocol.
+  const dialect = getDialect()
+  return await claimWithDb(dialect, key, fingerprint, ttlMs)
 }
 
 async function claimWithDb(
-  db: Kysely<Database>,
+  dialect: ReturnType<typeof getDialect>,
   key: string,
   fingerprint: string,
   ttlMs: number,
 ): Promise<ClaimResult> {
-  const dialect = getDialect()
+  const db = getDb()
 
   // Compute the TTL cutoff in SQL so it shares the clock that wrote
   // `created_at`. A JS-computed cutoff (Date.now() - ttlMs) compared
@@ -107,7 +113,7 @@ async function claimWithDb(
   // Retry once — the second attempt will succeed because no other
   // request is holding the slot.
   if (!lookup) {
-    return claimWithDb(db, key, fingerprint, ttlMs)
+    return claimWithDb(dialect, key, fingerprint, ttlMs)
   }
 
   if (lookup.request_hash !== fingerprint) return { kind: 'mismatch' }

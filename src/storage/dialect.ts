@@ -56,7 +56,11 @@ export function sqlitePathFromUrl(url: string): string {
  * milliseconds before the database's `now()`.
  *
  *   Postgres: `now() - $N::int * interval '1 millisecond'`  (param: ms)
- *   SQLite:   `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', $N)`   (param: '-<ms> milliseconds')
+ *   SQLite:   `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', $N)`
+ *             with the parameter rendered as `-<ms/1000> seconds`
+ *             (SQLite's only valid sub-second modifier — its
+ *             `'milliseconds'` token returns NULL — caught during
+ *             the openfga-8ys investigation).
  *
  * The cutoff is computed in SQL so it shares the database's clock —
  * a JS-computed `Date.now() - ms` against a Postgres-assigned
@@ -69,7 +73,12 @@ export function dialectNowMinus(dialect: DialectName, ms: number): RawBuilder<st
   if (dialect === 'postgres') {
     return sql<string>`now() - ${ms}::int * interval '1 millisecond'`
   }
-  return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms} milliseconds`})`
+  // SQLite supports fractional seconds in the `±N seconds` modifier
+  // (e.g. `'-60.5 seconds'`). It does NOT support a `'milliseconds'`
+  // token — passing it returns NULL, which silently breaks any
+  // comparison the result is the right-hand side of (the openfga-how
+  // TTL-cutoff bug class).
+  return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${(ms / 1000).toFixed(3)} seconds`})`
 }
 
 /**
