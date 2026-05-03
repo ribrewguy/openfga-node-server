@@ -7,34 +7,16 @@
  * the model loader CLI share connections. Tests can `resetPool()` to
  * swap DSNs between cases.
  */
-import { Pool, types as pgTypes } from 'pg'
+import { Pool } from 'pg'
 import type { PoolConfig } from 'pg'
 import { logger } from '../logger'
-
-// Return timestamptz (OID 1184) and timestamp (OID 1114) as raw text
-// from Postgres rather than the default JS Date conversion. Date has
-// only millisecond precision, but Postgres timestamps carry
-// microseconds; the truncation breaks cursor pagination on tables
-// where multiple rows can share the same wall-clock millisecond
-// (e.g. tuples written in a single transaction). The text form
-// preserves full precision and round-trips losslessly through the
-// `<col>::timestamptz` cast on the return path. See openfga-5uv.
-const PG_OID_TIMESTAMPTZ = 1184
-const PG_OID_TIMESTAMP = 1114
-pgTypes.setTypeParser(PG_OID_TIMESTAMPTZ, (value) => value)
-pgTypes.setTypeParser(PG_OID_TIMESTAMP, (value) => value)
+// Side effect: registers pg type-parser overrides for OIDs 1184/1114
+// so timestamptz/timestamp return as text (preserves microsecond
+// precision — see openfga-5uv). The helper `intFromEnv` is shared
+// with db.ts.
+import { intFromEnv } from './pg-internals'
 
 let _pool: Pool | null = null
-
-function intFromEnv(key: string, fallback: number): number {
-  const v = process.env[key]
-  if (v === undefined || v === '') return fallback
-  const n = Number(v)
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`[openfga] ${key} must be a non-negative integer; got "${v}"`)
-  }
-  return n
-}
 
 function buildConfig(): PoolConfig {
   const connectionString = process.env['OPENFGA_DB_URL']

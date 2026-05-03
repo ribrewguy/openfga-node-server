@@ -25,17 +25,17 @@ import { getDb, getDialect, getNamespace, resetDb } from '../../src/storage/db'
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
 
-beforeEach(() => {
+beforeEach(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k]
-  resetDb()
+  await resetDb()
 })
 
-afterEach(() => {
+afterEach(async () => {
   for (const k of ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
-  resetDb()
+  await resetDb()
 })
 
 describe('dialectFromUrl', () => {
@@ -134,10 +134,12 @@ describe('getDialect', () => {
 })
 
 describe('TablePrefixPlugin', () => {
-  // Use the SqliteAdapter triplet via DummyDriver so we can compile
-  // queries without a live connection. The plugin operates on the
-  // OperationNode tree, which is compiler-agnostic.
-  function buildSqliteCompiler(plugins: TablePrefixPlugin[]): Kysely<Database> {
+  // Compile queries via the Postgres dialect triplet on a DummyDriver
+  // so we can assert SQL output without a live connection. The
+  // TablePrefixPlugin operates on the OperationNode tree, which is
+  // compiler-agnostic, so the choice of compiler does not affect the
+  // assertions below.
+  function buildCompiler(plugins: TablePrefixPlugin[]): Kysely<Database> {
     return new Kysely<Database>({
       dialect: {
         createAdapter: () => new PostgresAdapter(),
@@ -150,13 +152,13 @@ describe('TablePrefixPlugin', () => {
   }
 
   it('prepends the prefix to a SELECT FROM target', () => {
-    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const db = buildCompiler([new TablePrefixPlugin('openfga_')])
     const compiled = db.selectFrom('store').select('id').compile()
     expect(compiled.sql).toMatch(/from "openfga_store"/i)
   })
 
   it('prepends the prefix to INSERT INTO targets', () => {
-    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const db = buildCompiler([new TablePrefixPlugin('openfga_')])
     const compiled = db
       .insertInto('store')
       .values({ id: 'sid', name: 'n' })
@@ -165,7 +167,7 @@ describe('TablePrefixPlugin', () => {
   })
 
   it('prepends to JOIN targets', () => {
-    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const db = buildCompiler([new TablePrefixPlugin('openfga_')])
     const compiled = db
       .selectFrom('store')
       .innerJoin('authorization_model', 'authorization_model.store_id', 'store.id')
@@ -176,13 +178,13 @@ describe('TablePrefixPlugin', () => {
   })
 
   it('honours a configured non-default prefix', () => {
-    const db = buildSqliteCompiler([new TablePrefixPlugin('app_authz_')])
+    const db = buildCompiler([new TablePrefixPlugin('app_authz_')])
     const compiled = db.selectFrom('tuple').select('store_id').compile()
     expect(compiled.sql).toMatch(/from "app_authz_tuple"/i)
   })
 
   it('does not double-prefix already-prefixed names (idempotent)', () => {
-    const db = buildSqliteCompiler([
+    const db = buildCompiler([
       new TablePrefixPlugin('openfga_'),
       new TablePrefixPlugin('openfga_'),
     ])
@@ -193,7 +195,7 @@ describe('TablePrefixPlugin', () => {
   })
 
   it('skips identifiers that carry an explicit schema', () => {
-    const db = buildSqliteCompiler([new TablePrefixPlugin('openfga_')])
+    const db = buildCompiler([new TablePrefixPlugin('openfga_')])
     // Dotted literal `'public.store'` produces a TableNode whose
     // SchemableIdentifierNode has `schema` set; the prefix plugin
     // must leave such identifiers untouched so callers can opt out
@@ -205,7 +207,10 @@ describe('TablePrefixPlugin', () => {
 })
 
 describe('dialectNowMinus', () => {
-  function compileWith(dialect: 'postgres' | 'sqlite', ms: number): string {
+  // Compile via the Postgres dialect triplet — `dialectNowMinus`'s
+  // SQL string is dialect-internal, so the surrounding compiler only
+  // affects placeholder formatting (Postgres uses `$N`).
+  function compileWith(dialect: 'postgres' | 'sqlite', ms: number): { sql: string, parameters: readonly unknown[] } {
     const db = new Kysely<Database>({
       dialect: {
         createAdapter: () => new PostgresAdapter(),
@@ -214,18 +219,20 @@ describe('dialectNowMinus', () => {
         createQueryCompiler: () => new PostgresQueryCompiler(),
       },
     })
-    const node = sql`select ${dialectNowMinus(dialect, ms)}`.compile(db)
-    return node.sql
+    const compiled = sql`select ${dialectNowMinus(dialect, ms)}`.compile(db)
+    return { sql: compiled.sql, parameters: compiled.parameters }
   }
 
-  it('emits Postgres interval arithmetic', () => {
-    const sqlText = compileWith('postgres', 60_000)
-    expect(sqlText).toMatch(/now\(\)\s*-\s*60000::int\s*\*\s*interval '1 millisecond'/i)
+  it('emits Postgres interval arithmetic with parameterized ms', () => {
+    const { sql: sqlText, parameters } = compileWith('postgres', 60_000)
+    expect(sqlText).toMatch(/now\(\)\s*-\s*\$\d+::int\s*\*\s*interval '1 millisecond'/i)
+    expect(parameters).toEqual([60_000])
   })
 
-  it('emits SQLite strftime with negative-milliseconds modifier', () => {
-    const sqlText = compileWith('sqlite', 60_000)
-    expect(sqlText).toMatch(/strftime\('%Y-%m-%dT%H:%M:%fZ',\s*'now',\s*'-60000 milliseconds'\)/i)
+  it('emits SQLite strftime with parameterized negative-milliseconds modifier', () => {
+    const { sql: sqlText, parameters } = compileWith('sqlite', 60_000)
+    expect(sqlText).toMatch(/strftime\('%Y-%m-%dT%H:%M:%fZ',\s*'now',\s*\$\d+\)/i)
+    expect(parameters).toEqual(['-60000 milliseconds'])
   })
 })
 
@@ -268,7 +275,7 @@ describe('getDb (SQLite end-to-end smoke)', () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'first'
     const a = getDb()
     expect(a).toBe(getDb())
-    resetDb()
+    await resetDb()
     process.env['OPENFGA_DB_NAMESPACE'] = 'second'
     const b = getDb()
     expect(b).not.toBe(a)

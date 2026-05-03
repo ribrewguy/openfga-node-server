@@ -17,7 +17,6 @@
  *     defensive pass-through queries.
  */
 import {
-  IdentifierNode,
   type KyselyPlugin,
   OperationNodeTransformer,
   type PluginTransformQueryArgs,
@@ -59,8 +58,3 @@ export class TablePrefixPlugin implements KyselyPlugin {
     return args.result
   }
 }
-
-// Re-exported only so consumers can construct fresh transformers in
-// tests without instantiating a full plugin. Not part of the public
-// surface that storage modules import.
-export { TablePrefixTransformer as _TablePrefixTransformer, IdentifierNode as _IdentifierNode }
