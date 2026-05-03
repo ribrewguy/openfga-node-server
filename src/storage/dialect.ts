@@ -55,16 +55,19 @@ export function sqlitePathFromUrl(url: string): string {
  * differs per engine; both produce a timestamp at exactly `ms`
  * milliseconds before the database's `now()`.
  *
- *   Postgres: `now() - $1::int * interval '1 millisecond'`
- *   SQLite:   `STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || $1 || ' milliseconds')`
+ *   Postgres: `now() - $N::int * interval '1 millisecond'`  (param: ms)
+ *   SQLite:   `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', $N)`   (param: '-<ms> milliseconds')
  *
  * The cutoff is computed in SQL so it shares the database's clock —
  * a JS-computed `Date.now() - ms` against a Postgres-assigned
- * `created_at` is a clock-skew race (see openfga-how).
+ * `created_at` is a clock-skew race (see openfga-how). The `ms`
+ * value is passed as a Kysely parameter (no `sql.lit`) so callers
+ * with different TTLs share a prepared-statement cache slot, matching
+ * the original idempotency.ts behavior that this helper replaces.
  */
 export function dialectNowMinus(dialect: DialectName, ms: number): RawBuilder<string> {
   if (dialect === 'postgres') {
-    return sql<string>`now() - ${sql.lit(ms)}::int * interval '1 millisecond'`
+    return sql<string>`now() - ${ms}::int * interval '1 millisecond'`
   }
-  return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${sql.lit(`-${ms} milliseconds`)})`
+  return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ${`-${ms} milliseconds`})`
 }

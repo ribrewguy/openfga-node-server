@@ -29,24 +29,18 @@
  * `getPgPool()` in this module exclusively.
  */
 import { Kysely, ParseJSONResultsPlugin, PostgresDialect, SqliteDialect } from 'kysely'
-import { Pool, types as pgTypes } from 'pg'
+import { Pool } from 'pg'
 import type { PoolConfig } from 'pg'
 import Sqlite from 'better-sqlite3'
 import { logger } from '../logger'
 import type { Database } from './db-schema'
 import { dialectFromUrl, sqlitePathFromUrl, type DialectName } from './dialect'
 import { TablePrefixPlugin } from './table-prefix-plugin'
-
-// Preserve openfga-5uv: return timestamptz/timestamp as raw text from
-// Postgres rather than the default JS Date conversion. Date truncates
-// to milliseconds, and that breaks cursor pagination on tables where
-// multiple rows share a wall-clock millisecond. This call duplicates
-// the one in pool.ts; both will be unified into this module when
-// pool.ts is removed during the openfga-8ri epic.
-const PG_OID_TIMESTAMPTZ = 1184
-const PG_OID_TIMESTAMP = 1114
-pgTypes.setTypeParser(PG_OID_TIMESTAMPTZ, value => value)
-pgTypes.setTypeParser(PG_OID_TIMESTAMP, value => value)
+// Side effect: registers pg type-parser overrides for OIDs 1184/1114
+// so timestamptz/timestamp return as text (preserves microsecond
+// precision — see openfga-5uv). The helper `intFromEnv` is shared
+// with pool.ts.
+import { intFromEnv } from './pg-internals'
 
 const NAMESPACE_PATTERN = /^[a-z][a-z0-9_]{0,62}$/
 const DEFAULT_NAMESPACE = 'openfga'
@@ -54,18 +48,6 @@ const DEFAULT_NAMESPACE = 'openfga'
 let _namespace: string | null = null
 let _db: Kysely<Database> | null = null
 let _dialect: DialectName | null = null
-let _pgPool: Pool | null = null
-let _sqlite: Sqlite.Database | null = null
-
-function intFromEnv(key: string, fallback: number): number {
-  const v = process.env[key]
-  if (v === undefined || v === '') return fallback
-  const n = Number(v)
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`[openfga] ${key} must be a non-negative integer; got "${v}"`)
-  }
-  return n
-}
 
 /**
  * Read and validate the table namespace. Cached for the process
@@ -152,9 +134,8 @@ export function getDb(): Kysely<Database> {
   const namespace = getNamespace()
 
   if (dialect === 'postgres') {
-    _pgPool = buildPgPool()
     const base = new Kysely<Database>({
-      dialect: new PostgresDialect({ pool: _pgPool }),
+      dialect: new PostgresDialect({ pool: buildPgPool() }),
     })
     // Schema-scope the entire instance so logical queries against
     // `'store'` compile to `<namespace>.store`.
@@ -163,9 +144,8 @@ export function getDb(): Kysely<Database> {
     return _db
   }
 
-  _sqlite = buildSqlite()
   _db = new Kysely<Database>({
-    dialect: new SqliteDialect({ database: _sqlite }),
+    dialect: new SqliteDialect({ database: buildSqlite() }),
     plugins: [
       new TablePrefixPlugin(`${namespace}_`),
       // jsonb columns auto-parse on Postgres, but better-sqlite3
@@ -178,14 +158,16 @@ export function getDb(): Kysely<Database> {
   return _db
 }
 
-/** Test-only: tear down the singleton so tests can swap configurations. */
-export function resetDb(): void {
-  if (_db) {
-    _db.destroy().catch(() => { /* swallow */ })
-  }
+/**
+ * Test-only: tear down the singleton so tests can swap configurations.
+ * Awaits `Kysely.destroy()` so the underlying driver releases its
+ * resources (pg.Pool drains, better-sqlite3.Database closes) before
+ * the next `getDb()` builds a new instance.
+ */
+export async function resetDb(): Promise<void> {
+  const previous = _db
   _db = null
   _dialect = null
   _namespace = null
-  _pgPool = null
-  _sqlite = null
+  if (previous) await previous.destroy()
 }

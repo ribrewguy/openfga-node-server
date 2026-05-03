@@ -72,6 +72,11 @@ export interface IdempotencyKeyTable {
   request_hash: string
   status: 'in_flight' | 'completed'
   response_status: ColumnType<number | null, number | null | undefined, number | null>
+  // ColumnType (not JSONColumnType) is deliberate here. Idempotency
+  // response payloads are heterogeneous (any successful endpoint's
+  // response shape), so the select type stays `unknown` for callers
+  // to narrow. The current src/storage/idempotency.ts JSON.stringifies
+  // on insert, so the insert type is the already-stringified form.
   response_body: ColumnType<unknown, string | null | undefined, string | null>
   created_at: Generated<string>
   completed_at: ColumnType<string | null, string | null | undefined, string | null>
