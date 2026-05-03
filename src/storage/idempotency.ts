@@ -5,6 +5,11 @@
  * consumer. The functions here encapsulate the SQL and the
  * concurrency protocol so the middleware can stay readable.
  *
+ * Routes through Kysely via `getDb()` (openfga-6tv). The TTL cutoff
+ * is rendered by `dialectNowMinus(dialect, ms)` so the openfga-how
+ * SQL-side cutoff (cutoff and `created_at` share the database's
+ * clock) is preserved across both engines.
+ *
  * Concurrency model:
  *
  *   - `claimKey` is the atomic entry point. It deletes any expired
@@ -20,21 +25,16 @@
  *   - `releaseKey` removes an in-flight row when the handler errored
  *     (5xx or thrown exception) so the client can retry cleanly.
  */
-import type { PoolClient } from 'pg'
-import { getPool } from './pool'
+import { sql, type Kysely } from 'kysely'
+import { getDb, getDialect } from './db'
+import type { Database } from './db-schema'
+import { dialectNow, dialectNowMinus } from './dialect'
 
 export type ClaimResult =
   | { kind: 'claimed' }
   | { kind: 'in_flight' }
   | { kind: 'mismatch' }
-  | { kind: 'replay'; status: number; body: unknown }
-
-interface IdempotencyRow {
-  request_hash: string
-  status: 'in_flight' | 'completed'
-  response_status: number | null
-  response_body: unknown
-}
+  | { kind: 'replay', status: number, body: unknown }
 
 /**
  * Atomically claim an idempotency-key slot or classify the existing
@@ -57,74 +57,66 @@ export async function claimKey(
   fingerprint: string,
   ttlMs: number,
 ): Promise<ClaimResult> {
-  const pool = getPool()
-  const client = await pool.connect()
-  try {
-    return await claimWithClient(client, key, fingerprint, ttlMs)
-  }
-  finally {
-    client.release()
-  }
+  // Scope the DELETE+INSERT+SELECT to a single connection so they
+  // share a clock and avoid extra checkout/release cycles. SQLite is
+  // single-connection so this is a no-op there; on Postgres it
+  // matches the original pool.connect() shape.
+  return await getDb().connection().execute(async (db) => {
+    return await claimWithDb(db, key, fingerprint, ttlMs)
+  })
 }
 
-async function claimWithClient(
-  client: PoolClient,
+async function claimWithDb(
+  db: Kysely<Database>,
   key: string,
   fingerprint: string,
   ttlMs: number,
 ): Promise<ClaimResult> {
+  const dialect = getDialect()
+
   // Compute the TTL cutoff in SQL so it shares the clock that wrote
   // `created_at`. A JS-computed cutoff (Date.now() - ttlMs) compared
-  // against the row's Postgres-assigned `created_at` is a clock-skew
+  // against the row's database-assigned `created_at` is a clock-skew
   // race: even microsecond drift between the application container
   // and the DB can leave rows strictly after the JS cutoff, making
   // the DELETE silently miss them and the SELECT then return them
-  // with a stale fingerprint.
-  //
-  // Postgres `now()` returns transaction-start time, which is
-  // monotonic across separate (autocommit) transactions on the same
-  // connection — so any row inserted by an earlier query can never
-  // appear "future-dated" relative to a later cutoff.
-  await client.query(
-    `DELETE FROM openfga.idempotency_keys
-      WHERE key = $1
-        AND created_at < now() - $2::int * interval '1 millisecond'`,
-    [key, ttlMs],
-  )
+  // with a stale fingerprint. See openfga-how.
+  await db
+    .deleteFrom('idempotency_keys')
+    .where('key', '=', key)
+    .where(sql<boolean>`created_at < ${dialectNowMinus(dialect, ttlMs)}`)
+    .execute()
 
-  const insert = await client.query<{ key: string }>(
-    `INSERT INTO openfga.idempotency_keys (key, request_hash, status)
-     VALUES ($1, $2, 'in_flight')
-     ON CONFLICT (key) DO NOTHING
-     RETURNING key`,
-    [key, fingerprint],
-  )
+  const insertResult = await db
+    .insertInto('idempotency_keys')
+    .values({ key, request_hash: fingerprint, status: 'in_flight' })
+    .onConflict(oc => oc.column('key').doNothing())
+    .returning('key')
+    .executeTakeFirst()
 
-  if ((insert.rowCount ?? 0) === 1) return { kind: 'claimed' }
+  if (insertResult) return { kind: 'claimed' }
 
-  const lookup = await client.query<IdempotencyRow>(
-    `SELECT request_hash, status, response_status, response_body
-       FROM openfga.idempotency_keys
-      WHERE key = $1
-        AND created_at >= now() - $2::int * interval '1 millisecond'`,
-    [key, ttlMs],
-  )
-  const row = lookup.rows[0]
+  const lookup = await db
+    .selectFrom('idempotency_keys')
+    .select(['request_hash', 'status', 'response_status', 'response_body'])
+    .where('key', '=', key)
+    .where(sql<boolean>`created_at >= ${dialectNowMinus(dialect, ttlMs)}`)
+    .executeTakeFirst()
 
   // The row was deleted between our DELETE and INSERT (rare TTL race).
   // Retry once — the second attempt will succeed because no other
   // request is holding the slot.
-  if (!row) {
-    return claimWithClient(client, key, fingerprint, ttlMs)
+  if (!lookup) {
+    return claimWithDb(db, key, fingerprint, ttlMs)
   }
 
-  if (row.request_hash !== fingerprint) return { kind: 'mismatch' }
-  if (row.status === 'in_flight') return { kind: 'in_flight' }
+  if (lookup.request_hash !== fingerprint) return { kind: 'mismatch' }
+  if (lookup.status === 'in_flight') return { kind: 'in_flight' }
 
   return {
     kind: 'replay',
-    status: row.response_status ?? 500,
-    body: row.response_body,
+    status: lookup.response_status ?? 500,
+    body: lookup.response_body,
   }
 }
 
@@ -133,22 +125,25 @@ export async function completeKey(
   status: number,
   body: unknown,
 ): Promise<void> {
-  const pool = getPool()
-  await pool.query(
-    `UPDATE openfga.idempotency_keys
-        SET status = 'completed',
-            response_status = $1,
-            response_body = $2,
-            completed_at = now()
-      WHERE key = $3`,
-    [status, body === undefined ? null : body, key],
-  )
+  await getDb()
+    .updateTable('idempotency_keys')
+    .set({
+      status: 'completed',
+      response_status: status,
+      // JSON column insert/update type is `string | null` per the
+      // ColumnType deviation documented in db-schema.ts; the caller
+      // hands us an arbitrary value, we stringify (or null when
+      // undefined) to match the legacy contract.
+      response_body: body === undefined ? null : JSON.stringify(body),
+      completed_at: dialectNow(getDialect()),
+    })
+    .where('key', '=', key)
+    .execute()
 }
 
 export async function releaseKey(key: string): Promise<void> {
-  const pool = getPool()
-  await pool.query(
-    `DELETE FROM openfga.idempotency_keys WHERE key = $1`,
-    [key],
-  )
+  await getDb()
+    .deleteFrom('idempotency_keys')
+    .where('key', '=', key)
+    .execute()
 }

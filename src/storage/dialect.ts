@@ -90,3 +90,33 @@ export function dialectTimestampParam(dialect: DialectName, value: string): RawB
   }
   return sql<string>`${value}`
 }
+
+/**
+ * Render a bigint string parameter with a Postgres `::bigint` cast,
+ * or as a bare parameter on SQLite. Used inside row-tuple cursor
+ * comparisons on `tuple_change.seq` (a Postgres bigserial column;
+ * the parameter ships as text and Postgres needs the cast to type it
+ * unambiguously inside a row-tuple).
+ */
+export function dialectBigintParam(dialect: DialectName, value: string): RawBuilder<string> {
+  if (dialect === 'postgres') {
+    return sql<string>`${value}::bigint`
+  }
+  // SQLite: cast to INTEGER so cursor-bound row-tuple comparisons
+  // are numeric, not lexicographic. Without this, seq="100" < seq="20"
+  // would compare wrong as text.
+  return sql<string>`cast(${value} as integer)`
+}
+
+/**
+ * Render the database's "now" — Postgres `now()` returns a
+ * timestamptz; SQLite `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` returns
+ * an ISO-8601 text. Used inside `UPDATE … SET completed_at = …`
+ * where the column default doesn't apply.
+ */
+export function dialectNow(dialect: DialectName): RawBuilder<string> {
+  if (dialect === 'postgres') {
+    return sql<string>`now()`
+  }
+  return sql<string>`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
+}

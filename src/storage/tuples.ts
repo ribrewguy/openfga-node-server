@@ -1,9 +1,12 @@
 /**
  * Repository for `openfga.tuple` rows.
  *
- * The evaluator depends on tuples through the `TupleStore` interface
- * (see `../evaluator/tuple-store.ts`) so unit tests can swap an
- * in-memory implementation in.
+ * Routes through Kysely via `getDb()` (openfga-6tv). The dialect-
+ * specific row-tuple cursor casts go through helpers in
+ * `./dialect.ts`. The transactional changelog invariant (every
+ * successful write/delete records a corresponding `tuple_change`
+ * row in the SAME transaction) is preserved via Kysely's
+ * `transaction().execute()` block.
  *
  * Object references on the wire have the form `<type>:<id>`. We split
  * them at the boundary so the table schema stays normalized — that way
@@ -13,8 +16,10 @@
  * (`user:<id>`), a userset reference (`<type>:<id>#<relation>`), or a
  * typed wildcard (`<type>:*`). The evaluator parses it on read.
  */
+import { sql } from 'kysely'
 import type { TupleKey, TupleKeyWithoutCondition } from '@openfga/sdk'
-import { getPool } from './pool'
+import { getDb, getDialect } from './db'
+import { dialectBigintParam, dialectTimestampParam } from './dialect'
 import { generateId } from './ids'
 
 export interface TupleRow {
@@ -103,71 +108,76 @@ export async function applyTupleMutations(
   storeId: string,
   mutations: TupleMutations,
 ): Promise<void> {
-  const pool = getPool()
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-
+  await getDb().transaction().execute(async (trx) => {
     for (const t of mutations.writes) {
       const obj = parseObject(t.object)
-      const result = await client.query(
-        `INSERT INTO openfga.tuple (store_id, object_type, object_id, relation, user_str)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT DO NOTHING`,
-        [storeId, obj.type, obj.id, t.relation, t.user],
-      )
-      if (result.rowCount === 0 && mutations.onDuplicate === 'error') {
+      const insertResult = await trx
+        .insertInto('tuple')
+        .values({
+          store_id: storeId,
+          object_type: obj.type,
+          object_id: obj.id,
+          relation: t.relation,
+          user_str: t.user,
+        })
+        .onConflict(oc => oc.doNothing())
+        .executeTakeFirst()
+      const inserted = (insertResult.numInsertedOrUpdatedRows ?? 0n) > 0n
+      if (!inserted && mutations.onDuplicate === 'error') {
         throw new DuplicateTupleError(t)
       }
       // Record the change in the same transaction as the mutation
       // so a crash between the two cannot leave the changelog out of
       // sync with tuple state. Skip when ON CONFLICT silently ignored
       // — the caller asked for at-most-once semantics on duplicates.
-      if (result.rowCount && result.rowCount > 0) {
-        await client.query(
-          `INSERT INTO openfga.tuple_change
-             (id, store_id, object_type, object_id, relation, user_str, operation)
-           VALUES ($1, $2, $3, $4, $5, $6, 'TUPLE_OPERATION_WRITE')`,
-          [generateId(), storeId, obj.type, obj.id, t.relation, t.user],
-        )
+      if (inserted) {
+        await trx
+          .insertInto('tuple_change')
+          .values({
+            id: generateId(),
+            store_id: storeId,
+            object_type: obj.type,
+            object_id: obj.id,
+            relation: t.relation,
+            user_str: t.user,
+            operation: 'TUPLE_OPERATION_WRITE',
+          })
+          .execute()
       }
     }
 
     for (const t of mutations.deletes) {
       const obj = parseObject(t.object)
-      const result = await client.query(
-        `DELETE FROM openfga.tuple
-          WHERE store_id = $1
-            AND object_type = $2
-            AND object_id = $3
-            AND relation = $4
-            AND user_str = $5`,
-        [storeId, obj.type, obj.id, t.relation, t.user],
-      )
-      if (result.rowCount === 0 && mutations.onMissing === 'error') {
+      const deleteResult = await trx
+        .deleteFrom('tuple')
+        .where('store_id', '=', storeId)
+        .where('object_type', '=', obj.type)
+        .where('object_id', '=', obj.id)
+        .where('relation', '=', t.relation)
+        .where('user_str', '=', t.user)
+        .executeTakeFirst()
+      const deleted = (deleteResult.numDeletedRows ?? 0n) > 0n
+      if (!deleted && mutations.onMissing === 'error') {
         throw new MissingTupleError(t)
       }
       // Same transactional invariant as writes: only record a change
       // when the DELETE actually removed a row.
-      if (result.rowCount && result.rowCount > 0) {
-        await client.query(
-          `INSERT INTO openfga.tuple_change
-             (id, store_id, object_type, object_id, relation, user_str, operation)
-           VALUES ($1, $2, $3, $4, $5, $6, 'TUPLE_OPERATION_DELETE')`,
-          [generateId(), storeId, obj.type, obj.id, t.relation, t.user],
-        )
+      if (deleted) {
+        await trx
+          .insertInto('tuple_change')
+          .values({
+            id: generateId(),
+            store_id: storeId,
+            object_type: obj.type,
+            object_id: obj.id,
+            relation: t.relation,
+            user_str: t.user,
+            operation: 'TUPLE_OPERATION_DELETE',
+          })
+          .execute()
       }
     }
-
-    await client.query('COMMIT')
-  }
-  catch (e) {
-    await client.query('ROLLBACK')
-    throw e
-  }
-  finally {
-    client.release()
-  }
+  })
 }
 
 export async function writeTuples(
@@ -206,6 +216,8 @@ export async function readTuples(
   return page.rows
 }
 
+const TUPLE_COLUMNS = ['store_id', 'object_type', 'object_id', 'relation', 'user_str', 'inserted_at'] as const
+
 /**
  * Cursor-paginated read of tuples for a store. Same filter surface as
  * readTuples plus an optional `cursor` arg; returns a page of rows
@@ -222,57 +234,53 @@ export async function readTuplesPage(
   filter: ReadFilter,
   cursor: ReadTupleCursor | null,
 ): Promise<ReadTuplesPage> {
-  const pool = getPool()
-  const where: string[] = ['store_id = $1']
-  const params: unknown[] = [storeId]
-  let p = 2
+  let query = getDb()
+    .selectFrom('tuple')
+    .select(TUPLE_COLUMNS)
+    .where('store_id', '=', storeId)
 
   if (filter.object) {
     const obj = parseObject(filter.object)
-    where.push(`object_type = $${p++}`)
-    params.push(obj.type)
+    query = query.where('object_type', '=', obj.type)
     // OpenFGA wire format admits type-only filters of the form
     // "type:" — distinguish those from full references "type:id" and
     // skip the object_id predicate so the query returns every tuple
     // for the requested type. Adding `object_id = ''` would silently
     // return zero rows.
     if (obj.id !== '') {
-      where.push(`object_id = $${p++}`)
-      params.push(obj.id)
+      query = query.where('object_id', '=', obj.id)
     }
   }
   else if (filter.objectType) {
-    where.push(`object_type = $${p++}`)
-    params.push(filter.objectType)
+    query = query.where('object_type', '=', filter.objectType)
   }
   if (filter.relation) {
-    where.push(`relation = $${p++}`)
-    params.push(filter.relation)
+    query = query.where('relation', '=', filter.relation)
   }
   if (filter.user) {
-    where.push(`user_str = $${p++}`)
-    params.push(filter.user)
+    query = query.where('user_str', '=', filter.user)
   }
 
   if (cursor) {
-    // Five-field row-tuple comparison gives a stable total order on
-    // the page boundary. Postgres compares row tuples lexicographically.
-    where.push(
-      `(inserted_at, object_type, object_id, relation, user_str)`
-      + ` > ($${p++}::timestamptz, $${p++}::text, $${p++}::text, $${p++}::text, $${p++}::text)`,
-    )
-    params.push(cursor.inserted_at, cursor.object_type, cursor.object_id, cursor.relation, cursor.user_str)
+    // 5-field row-tuple comparison gives a stable total order on the
+    // page boundary. Postgres compares row tuples lexicographically.
+    // Only the leading timestamp parameter needs an explicit dialect
+    // cast — the trailing four are text both sides, which Postgres
+    // resolves from the column types.
+    const ts = dialectTimestampParam(getDialect(), cursor.inserted_at)
+    query = query.where(sql<boolean>`(inserted_at, object_type, object_id, relation, user_str) > (${ts}, ${cursor.object_type}, ${cursor.object_id}, ${cursor.relation}, ${cursor.user_str})`)
   }
 
   const pageSize = filter.pageSize ?? 100
-  const { rows } = await pool.query<TupleRow>(
-    `SELECT store_id, object_type, object_id, relation, user_str, inserted_at
-       FROM openfga.tuple
-      WHERE ${where.join(' AND ')}
-      ORDER BY inserted_at ASC, object_type ASC, object_id ASC, relation ASC, user_str ASC
-      LIMIT $${p}`,
-    [...params, pageSize + 1],
-  )
+  const rows = await query
+    .orderBy('inserted_at', 'asc')
+    .orderBy('object_type', 'asc')
+    .orderBy('object_id', 'asc')
+    .orderBy('relation', 'asc')
+    .orderBy('user_str', 'asc')
+    .limit(pageSize + 1)
+    .execute()
+
   if (rows.length <= pageSize) {
     return { rows, nextCursor: null }
   }
@@ -322,11 +330,16 @@ export interface ListChangesPage {
  * query) and `startTime` (only changes recorded at or after the
  * timestamp).
  *
- * Pagination uses (inserted_at, id) row-tuple comparison with a
+ * Pagination uses (inserted_at, seq) row-tuple comparison with a
  * strictly-greater-than predicate so a change recorded at the
  * tail while a client is paging surfaces on the next call rather
  * than shifting previously-seen pages. The +1 fetch trick lets us
  * decide "is there a next page" without a separate COUNT query.
+ *
+ * The `seq` column is bigserial on Postgres (returned as text by
+ * pg) and INTEGER PRIMARY KEY AUTOINCREMENT or equivalent on SQLite
+ * (returned as number by better-sqlite3). The SELECT casts seq to
+ * text so the application sees a string regardless of dialect.
  *
  * See openfga-ra9 for the ordering inversion from the prior
  * newest-first implementation.
@@ -337,31 +350,43 @@ export async function listChangesPage(
   cursor: { inserted_at: string, seq: string } | null,
   opts: { objectType?: string, startTime?: string } = {},
 ): Promise<ListChangesPage> {
-  const pool = getPool()
-  const where: string[] = ['store_id = $1']
-  const params: unknown[] = [storeId]
-  let p = 2
+  const dialect = getDialect()
+  let query = getDb()
+    .selectFrom('tuple_change')
+    .select([
+      'id',
+      // Cast seq to text so SQLite doesn't return it as a JS number.
+      // Postgres bigserial already comes back as text via pg's default
+      // int8 parser; the cast is a no-op there.
+      sql<string>`cast(seq as text)`.as('seq'),
+      'object_type',
+      'object_id',
+      'relation',
+      'user_str',
+      'operation',
+      'inserted_at',
+    ])
+    .where('store_id', '=', storeId)
+
   if (opts.objectType) {
-    where.push(`object_type = $${p++}`)
-    params.push(opts.objectType)
+    query = query.where('object_type', '=', opts.objectType)
   }
   if (opts.startTime) {
-    where.push(`inserted_at >= $${p++}::timestamptz`)
-    params.push(opts.startTime)
+    const ts = dialectTimestampParam(dialect, opts.startTime)
+    query = query.where(sql<boolean>`inserted_at >= ${ts}`)
   }
   if (cursor) {
-    where.push(`(inserted_at, seq) > ($${p++}::timestamptz, $${p++}::bigint)`)
-    params.push(cursor.inserted_at, cursor.seq)
+    const ts = dialectTimestampParam(dialect, cursor.inserted_at)
+    const seq = dialectBigintParam(dialect, cursor.seq)
+    query = query.where(sql<boolean>`(inserted_at, seq) > (${ts}, ${seq})`)
   }
 
-  const { rows } = await pool.query<TupleChangeRow>(
-    `SELECT id, seq, object_type, object_id, relation, user_str, operation, inserted_at
-       FROM openfga.tuple_change
-      WHERE ${where.join(' AND ')}
-      ORDER BY inserted_at ASC, seq ASC
-      LIMIT $${p}`,
-    [...params, pageSize + 1],
-  )
+  const rows = await query
+    .orderBy('inserted_at', 'asc')
+    .orderBy('seq', 'asc')
+    .limit(pageSize + 1)
+    .execute()
+
   if (rows.length <= pageSize) {
     return { rows, nextCursor: null }
   }
@@ -381,16 +406,14 @@ export async function listUsersForRelation(
   objectId: string,
   relation: string,
 ): Promise<string[]> {
-  const pool = getPool()
-  const { rows } = await pool.query<{ user_str: string }>(
-    `SELECT user_str
-       FROM openfga.tuple
-      WHERE store_id = $1
-        AND object_type = $2
-        AND object_id = $3
-        AND relation = $4`,
-    [storeId, objectType, objectId, relation],
-  )
+  const rows = await getDb()
+    .selectFrom('tuple')
+    .select('user_str')
+    .where('store_id', '=', storeId)
+    .where('object_type', '=', objectType)
+    .where('object_id', '=', objectId)
+    .where('relation', '=', relation)
+    .execute()
   return rows.map(r => r.user_str)
 }
 
@@ -409,16 +432,15 @@ export async function listObjectIdsForUser(
   relation: string,
   userStr: string,
 ): Promise<string[]> {
-  const pool = getPool()
-  const { rows } = await pool.query<{ object_id: string }>(
-    `SELECT DISTINCT object_id
-       FROM openfga.tuple
-      WHERE store_id = $1
-        AND object_type = $2
-        AND relation = $3
-        AND user_str = $4`,
-    [storeId, objectType, relation, userStr],
-  )
+  const rows = await getDb()
+    .selectFrom('tuple')
+    .select('object_id')
+    .distinct()
+    .where('store_id', '=', storeId)
+    .where('object_type', '=', objectType)
+    .where('relation', '=', relation)
+    .where('user_str', '=', userStr)
+    .execute()
   return rows.map(r => r.object_id)
 }
 
@@ -433,14 +455,11 @@ export async function listAllForRelation(
   objectType: string,
   relation: string,
 ): Promise<Array<{ object_id: string, user_str: string }>> {
-  const pool = getPool()
-  const { rows } = await pool.query<{ object_id: string, user_str: string }>(
-    `SELECT object_id, user_str
-       FROM openfga.tuple
-      WHERE store_id = $1
-        AND object_type = $2
-        AND relation = $3`,
-    [storeId, objectType, relation],
-  )
-  return rows
+  return getDb()
+    .selectFrom('tuple')
+    .select(['object_id', 'user_str'])
+    .where('store_id', '=', storeId)
+    .where('object_type', '=', objectType)
+    .where('relation', '=', relation)
+    .execute()
 }
