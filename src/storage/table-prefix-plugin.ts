@@ -28,6 +28,14 @@ import {
   type UnknownRow,
 } from 'kysely'
 
+/**
+ * Identifiers that look like table references but aren't physical
+ * tables — `EXCLUDED` is the virtual row available inside ON CONFLICT
+ * DO UPDATE in both Postgres and SQLite. Adding the namespace prefix
+ * to these would emit `<ns>_excluded.col` which doesn't exist.
+ */
+const PREFIX_SKIP_IDENTIFIERS = new Set(['excluded'])
+
 class TablePrefixTransformer extends OperationNodeTransformer {
   constructor(private readonly prefix: string) {
     super()
@@ -38,6 +46,7 @@ class TablePrefixTransformer extends OperationNodeTransformer {
     const ident: SchemableIdentifierNode = transformed.table
     if (ident.schema !== undefined) return transformed
     const original = ident.identifier.name
+    if (PREFIX_SKIP_IDENTIFIERS.has(original.toLowerCase())) return transformed
     if (original.startsWith(this.prefix)) return transformed
     return TableNode.create(`${this.prefix}${original}`)
   }

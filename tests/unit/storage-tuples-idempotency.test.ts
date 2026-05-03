@@ -1,18 +1,12 @@
 /**
- * SQLite smoke tests for the ported `tuples.ts` and `idempotency.ts`
- * modules (recovered under openfga-8ys after the openfga-6tv vitest
- * hang investigation).
+ * Unit tests for `tuples.ts` and `idempotency.ts` against in-memory
+ * SQLite. Bootstraps the schema via the Kysely Migrator (the same
+ * migration files the production CLI applies under
+ * `pnpm migrate up`).
  *
- * Comprehensive coverage lands in openfga-yg9 (child #7) when SQLite
- * is wired into the vitest unit project as the default driver. This
- * file is a focused smoke test that exercises each function against
- * an in-memory SQLite to catch port mistakes locally; integration
- * tests on real Postgres validate the production path in CI.
- *
- * Bootstrap: openfga-g2j has shipped Kysely Migrator support, so
- * this file uses migrator.migrateToLatest() against the in-memory
- * SQLite to bring up the schema. That replaces the hand-rolled
- * `bootstrap()` pattern that the openfga-6tv smoke tests used.
+ * Originally introduced as smoke tests under openfga-6tv (after the
+ * openfga-8ys hang investigation). Promoted to migrator-backed unit
+ * tests under openfga-yg9.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { sql } from 'kysely'
@@ -33,80 +27,10 @@ import {
   completeKey,
   releaseKey,
 } from '../../src/storage/idempotency'
+import { migrateToLatest } from '../_helpers/sqlite-bootstrap'
 
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
-
-async function bootstrap(): Promise<void> {
-  // Hand-rolled DDL mirroring migrations/*.ts for the SQLite path.
-  // The migrations themselves are validated by `pnpm migrate up`
-  // against a real SQLite file (manual smoke during openfga-g2j) and
-  // by CI integration tests on Postgres. Using the Kysely Migrator
-  // here causes a vitest-specific hang under sequential tests
-  // (see openfga-8ys investigation): two or more tests that each
-  // call migrator.migrateToLatest() against fresh :memory: DBs in
-  // sequence hang the worker; the same migrator works fine in
-  // isolation and via the production CLI under tsx. The scope of
-  // these smoke tests is to catch storage-module port mistakes,
-  // not to re-validate migrations, so we sidestep the issue by
-  // creating tables directly.
-  const db = getDb()
-  await sql`
-    create table openfga_store (
-      id text primary key, name text not null,
-      created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-      updated_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-      deleted_at text
-    )
-  `.execute(db)
-  await sql`
-    create table openfga_authorization_model (
-      id text primary key,
-      store_id text not null references openfga_store(id) on delete cascade,
-      schema_version text not null,
-      model text not null,
-      created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    )
-  `.execute(db)
-  await sql`
-    create table openfga_tuple (
-      store_id text not null references openfga_store(id) on delete cascade,
-      object_type text not null, object_id text not null,
-      relation text not null, user_str text not null,
-      inserted_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-      primary key (store_id, object_type, object_id, relation, user_str)
-    )
-  `.execute(db)
-  await sql`
-    create table openfga_tuple_change (
-      id text primary key,
-      seq integer not null default 0,
-      store_id text not null references openfga_store(id),
-      object_type text not null, object_id text not null,
-      relation text not null, user_str text not null,
-      operation text not null,
-      inserted_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    )
-  `.execute(db)
-  await sql`
-    create trigger openfga_tuple_change_seq_assign
-    after insert on openfga_tuple_change
-    begin
-      update openfga_tuple_change set seq = NEW.rowid where id = NEW.id;
-    end
-  `.execute(db)
-  await sql`
-    create table openfga_idempotency_keys (
-      key text primary key,
-      request_hash text not null,
-      status text not null,
-      response_status integer,
-      response_body text,
-      created_at text not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-      completed_at text
-    )
-  `.execute(db)
-}
 
 async function makeStore(id = 's1'): Promise<string> {
   await sql`insert into openfga_store (id, name) values (${id}, ${id})`.execute(getDb())
@@ -116,9 +40,8 @@ async function makeStore(id = 's1'): Promise<string> {
 beforeEach(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k]
   await resetDb()
-  process.env['OPENFGA_DB_URL'] = ':memory:'
   delete process.env['OPENFGA_DB_NAMESPACE']
-  await bootstrap()
+  await migrateToLatest()
 })
 
 afterEach(async () => {
