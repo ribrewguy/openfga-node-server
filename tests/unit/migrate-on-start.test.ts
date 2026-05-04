@@ -17,6 +17,9 @@
  *     deploying with this flag are relying on.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { resetDb } from '../../src/storage/db'
 import { logger } from '../../src/logger'
 import { applyMigrationsOnStartIfEnabled, parseMigrateOnStart } from '../../src/storage/migrate-on-start'
@@ -108,6 +111,26 @@ describe('applyMigrationsOnStartIfEnabled', () => {
     )
     // DB stays untouched — readiness still reports schema_missing.
     expect(await checkReadiness()).toMatchObject({ ok: false, reason: 'schema_missing' })
+  })
+
+  it('propagates the underlying error when the migrator fails (corrupt DB)', async () => {
+    // Plant a non-SQLite file at the configured path. better-sqlite3
+    // opens the handle without inspecting contents, so the failure
+    // surfaces from the Migrator's first catalog query — exactly the
+    // shape of "the operator wired the wrong path" in production.
+    const dir = mkdtempSync(join(tmpdir(), 'openfga-migrate-on-start-'))
+    const corrupt = join(dir, 'corrupt.sqlite')
+    writeFileSync(corrupt, Buffer.from('this is not a sqlite database'))
+    process.env['OPENFGA_DB_URL'] = `sqlite:${corrupt}`
+    process.env['OPENFGA_MIGRATE_ON_START'] = 'true'
+    await resetDb()
+    try {
+      await expect(applyMigrationsOnStartIfEnabled()).rejects.toThrow()
+    }
+    finally {
+      await resetDb()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
