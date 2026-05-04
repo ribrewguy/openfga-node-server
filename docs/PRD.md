@@ -128,6 +128,17 @@ The full architectural decisions, dialect-portability hot spots, and
 phasing are in
 [`docs/features/db-agnosticism.md`](features/db-agnosticism.md).
 
+Self-hosted boots may opt into running migrations against the
+configured `OPENFGA_DB_URL` before binding sockets by setting
+`OPENFGA_MIGRATE_ON_START=true`. Default is `false`. The flag lives
+only in the self-host path (`src/server.ts`) and is intentionally not
+applied by `src/index.ts`, which is the Hono app file imported by
+serverless platforms. Serverless and multi-instance deployments
+should leave it disabled and continue running `pnpm migrate` as an
+explicit deploy step — concurrent boots correctly serialize on
+`kysely_migration_lock` (the Migrator's advisory lock), but every
+queued boot still pays the wait on the request-serving hot path.
+
 ### API caller authentication
 
 The server supports OpenFGA-aligned API caller authentication modes:
