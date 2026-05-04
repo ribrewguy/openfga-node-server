@@ -27,6 +27,13 @@ Co-authored-by: {INPUT_MODEL_NAME_VERSION_HERE} <{MODEL_COMPANY_EMAIL}>
 * The Beads ID SHOULD appear in the commit subject (preferred) or body.
 * Commits without a Beads reference are invalid and must be corrected before pushing.
 
+### Dependabot Exception
+
+* Commits authored by `dependabot[bot]` are exempt from the Beads ID requirement and from the multi-paragraph commit body requirement.
+* Dependabot is configured via `.github/dependabot.yml` to emit Conventional Commits subjects (e.g. `chore(deps): …`, `chore(deps-dev): …`, `chore(ci): …`).
+* No exception applies to non-Dependabot commits, including squashes that incorporate Dependabot work alongside human-authored changes — those commits remain subject to the Beads ID and body requirements.
+* The Co-Author requirement does not apply to Dependabot's own commits.
+
 ## Missing Bead Handling
 
 * Do not commit if no applicable Beads Issue exists.
