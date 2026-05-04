@@ -20,6 +20,12 @@
  * Both listeners may run simultaneously. At least one listener must
  * be active — disabling HTTP without TLS certs is a fatal misconfig.
  *
+ * When `OPENFGA_MIGRATE_ON_START=true`, the bootstrap awaits
+ * `migrator.migrateToLatest()` against `OPENFGA_DB_URL` before any
+ * `serve()` call. Default is `false`. The flag lives only in this
+ * self-host path; serverless / multi-instance deployments should
+ * leave it off and continue running `pnpm migrate` as a deploy step.
+ *
  * `dotenv/config` is imported first so a local `.env` file is loaded
  * before any other module reads `process.env`. In production the file
  * is typically absent and platform-injected env vars take over — the
@@ -31,6 +37,7 @@ import { createServer as createHttpsServer } from 'node:https'
 import { serve } from '@hono/node-server'
 import app from './index'
 import { logger } from './logger'
+import { applyMigrationsOnStartIfEnabled, parseMigrateOnStart } from './storage/migrate-on-start'
 
 if (!process.env['OPENFGA_DB_URL']) {
   logger.fatal({ env: 'OPENFGA_DB_URL' }, 'required env var not set; refusing to start')
@@ -74,6 +81,30 @@ if (httpEnabled && tlsEnabled && httpPort === httpsPort) {
     { httpPort, httpsPort },
     'OPENFGA_HTTP_PORT and OPENFGA_HTTPS_PORT cannot be equal when both listeners are active',
   )
+  process.exit(1)
+}
+
+// Validate OPENFGA_MIGRATE_ON_START up front so a malformed value is
+// fatal at boot rather than at the moment migrations would run. The
+// actual migrator invocation happens below, before any `serve()` call.
+try {
+  parseMigrateOnStart(process.env['OPENFGA_MIGRATE_ON_START'])
+}
+catch (err) {
+  logger.fatal({ err }, 'invalid OPENFGA_MIGRATE_ON_START')
+  process.exit(1)
+}
+
+// Run migrations against OPENFGA_DB_URL before binding sockets when
+// the operator has explicitly opted in. Failure here is fatal — the
+// server must not accept traffic against a half-migrated database.
+// See src/storage/migrate-on-start.ts for why this lives in
+// server.ts (NOT index.ts).
+try {
+  await applyMigrationsOnStartIfEnabled()
+}
+catch (err) {
+  logger.fatal({ err }, 'migrate_on_start_failed; refusing to start')
   process.exit(1)
 }
 

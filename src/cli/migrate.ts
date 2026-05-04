@@ -29,25 +29,9 @@
  * state contract.
  */
 import 'dotenv/config'
-import { Migrator, type MigrationResultSet } from 'kysely'
-import { getDb, getDialect, getNamespace, resetDb } from '../storage/db'
-import { isPostgres } from '../storage/dialect'
-import { StaticMigrationProvider } from './migrations-bundle'
-
-function buildMigrator() {
-  const ns = getNamespace()
-  const dialect = getDialect()
-  const db = getDb()
-  const migrationTableName = isPostgres(dialect) ? 'kysely_migration' : `${ns}_kysely_migration`
-  const migrationLockTableName = isPostgres(dialect) ? 'kysely_migration_lock' : `${ns}_kysely_migration_lock`
-  return new Migrator({
-    db,
-    provider: new StaticMigrationProvider(),
-    migrationTableName,
-    migrationLockTableName,
-    ...(isPostgres(dialect) ? { migrationTableSchema: ns } : {}),
-  })
-}
+import { type MigrationResultSet } from 'kysely'
+import { resetDb } from '../storage/db'
+import { buildMigrator } from '../storage/migrator'
 
 function reportResults(direction: 'up' | 'down', { error, results }: MigrationResultSet): boolean {
   let ok = true

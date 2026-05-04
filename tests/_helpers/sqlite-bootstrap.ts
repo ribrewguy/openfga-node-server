@@ -9,26 +9,12 @@
  * need to swap the URL save and restore the env in their own
  * beforeEach/afterEach (see storage-db.test.ts).
  *
- * The Migrator's tracking tables are namespaced exactly as the
- * production CLI namespaces them (kysely_migration[_lock] under the
- * configured OPENFGA_DB_NAMESPACE) — matches what
- * `migrator.migrateToLatest()` produces in `pnpm migrate up`.
+ * The Migrator setup is now centralized in `src/storage/migrator.ts`
+ * and shared with `pnpm migrate` and the OPENFGA_MIGRATE_ON_START
+ * boot path so test schema and production schema cannot drift.
  */
-import { Migrator } from 'kysely'
-import { getDb, getDialect, getNamespace } from '../../src/storage/db'
-import { isPostgres } from '../../src/storage/dialect'
-import { StaticMigrationProvider } from '../../src/cli/migrations-bundle'
+import { runMigrationsToLatest } from '../../src/storage/migrator'
 
 export async function migrateToLatest(): Promise<void> {
-  const ns = getNamespace()
-  const dialect = getDialect()
-  const migrator = new Migrator({
-    db: getDb(),
-    provider: new StaticMigrationProvider(),
-    migrationTableName: isPostgres(dialect) ? 'kysely_migration' : `${ns}_kysely_migration`,
-    migrationLockTableName: isPostgres(dialect) ? 'kysely_migration_lock' : `${ns}_kysely_migration_lock`,
-    ...(isPostgres(dialect) ? { migrationTableSchema: ns } : {}),
-  })
-  const { error } = await migrator.migrateToLatest()
-  if (error) throw error
+  await runMigrationsToLatest()
 }
