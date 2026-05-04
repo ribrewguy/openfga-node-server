@@ -68,6 +68,9 @@ Currently implemented:
   `?type=` and `?start_time=` filters)
 - `{GET,PUT} /stores/:storeId/assertions/:authorizationModelId`
 - `GET /health` (auth-exempt liveness probe)
+- `GET /ready` (auth-exempt readiness probe — `200 ok` only when the
+  database is reachable and the configured namespace has the expected
+  schema; `503` with a generic `reason` otherwise)
 
 The full OpenFGA REST wire-compliance epic (`openfga-68n`) closed
 with all seven endpoint children shipped (`openfga-7ct`,

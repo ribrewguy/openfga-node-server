@@ -52,6 +52,7 @@ import type { TupleStore } from '../evaluator/tuple-store'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
 import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
+import { checkReadiness } from '../storage/readiness'
 import { requireStore } from '../middleware/require-store'
 import { validate } from '../middleware/validation'
 import {
@@ -295,6 +296,17 @@ export function buildApp(): Hono {
   )
 
   app.get('/health', (c) => c.json({ status: 'ok' }))
+
+  // Readiness probe — distinct from /health (liveness). Returns 200
+  // only when the database is reachable AND the configured
+  // OPENFGA_DB_NAMESPACE has the core tables provisioned. 503 with a
+  // generic reason otherwise — the response never leaks DSN, schema,
+  // or driver-error detail.
+  app.get('/ready', async (c) => {
+    const status = await checkReadiness()
+    if (status.ok) return c.json({ status: 'ok' })
+    return c.json({ status: 'unhealthy', reason: status.reason }, 503)
+  })
 
   // ─── Stores ─────────────────────────────────────────────────────
   app.get('/stores', validate('query', ListStoresQuery), async (c) => {
