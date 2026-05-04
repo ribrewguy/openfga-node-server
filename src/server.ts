@@ -38,6 +38,8 @@ import { serve } from '@hono/node-server'
 import app from './index'
 import { logger } from './logger'
 import { applyMigrationsOnStartIfEnabled, parseMigrateOnStart } from './storage/migrate-on-start'
+import { describeDb } from './storage/db'
+import { checkReadiness } from './storage/readiness'
 
 if (!process.env['OPENFGA_DB_URL']) {
   logger.fatal({ env: 'OPENFGA_DB_URL' }, 'required env var not set; refusing to start')
@@ -107,6 +109,43 @@ catch (err) {
   logger.fatal({ err }, 'migrate_on_start_failed; refusing to start')
   process.exit(1)
 }
+
+// Run the readiness probe before binding sockets so a misconfigured
+// or unreachable database fails fast at boot — and so the resolved
+// pg.Pool / better-sqlite3 driver state populated by the first real
+// connection is available for the storage_connected log below.
+//
+// Failure modes:
+//   - db_unreachable: always fatal. Network, auth, DSN, or driver
+//     problem the operator must resolve before the server can serve
+//     any traffic.
+//   - schema_missing: fatal UNLESS the operator opted into
+//     OPENFGA_MIGRATE_ON_START. In the migrate-on-start path the
+//     migrator already ran above; if it succeeded but the readiness
+//     probe still reports schema_missing, surface a warn and let the
+//     /ready endpoint report the live state from there.
+const migrateOnStart = parseMigrateOnStart(process.env['OPENFGA_MIGRATE_ON_START'])
+const readiness = await checkReadiness()
+if (!readiness.ok) {
+  if (readiness.reason === 'schema_missing' && migrateOnStart) {
+    logger.warn(
+      { readiness, db: describeDb() },
+      'storage_schema_missing_after_migrate_on_start',
+    )
+  }
+  else {
+    logger.fatal(
+      { readiness, db: describeDb() },
+      'storage_probe_failed; refusing to start',
+    )
+    process.exit(1)
+  }
+}
+// Emit the resolved driver state at INFO so operators can see at a
+// glance which database the server is actually connected to — derived
+// from the live pg.Pool / better-sqlite3 instance, not by re-parsing
+// OPENFGA_DB_URL.
+logger.info(describeDb(), 'storage_connected')
 
 if (httpEnabled) {
   serve({ fetch: app.fetch, port: httpPort }, (info) => {

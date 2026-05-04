@@ -20,7 +20,7 @@ import { DummyDriver, Kysely, PostgresAdapter, PostgresIntrospector, PostgresQue
 import { dialectFromUrl, dialectNowMinus, sqlitePathFromUrl } from '../../src/storage/dialect'
 import type { Database } from '../../src/storage/db-schema'
 import { TablePrefixPlugin } from '../../src/storage/table-prefix-plugin'
-import { getDb, getDialect, getNamespace, resetDb } from '../../src/storage/db'
+import { describeDb, getDb, getDialect, getNamespace, resetDb } from '../../src/storage/db'
 
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
@@ -283,5 +283,71 @@ describe('getDb (SQLite end-to-end smoke)', () => {
     const b = getDb()
     expect(b).not.toBe(a)
     expect(getNamespace()).toBe('second')
+  })
+})
+
+describe('describeDb (SQLite path)', () => {
+  // Postgres-driver introspection requires a live pg.Pool that has
+  // accepted at least one connection (the `pool.on('connect', …)`
+  // snapshot fires on real connect events). That is exercised by the
+  // integration suite which runs against a real Postgres. These unit
+  // tests cover the SQLite branch — better-sqlite3 resolves all
+  // driver state at construction time, so describeDb() is fully
+  // populated as soon as getDb() returns.
+  beforeEach(() => {
+    process.env['OPENFGA_DB_URL'] = ':memory:'
+    delete process.env['OPENFGA_DB_NAMESPACE']
+  })
+
+  it('reports dialect=sqlite with resolved driver state for :memory:', () => {
+    getDb()
+    const desc = describeDb()
+    expect(desc).toEqual({
+      dialect: 'sqlite',
+      namespace: 'openfga',
+      tablePrefix: 'openfga_',
+      path: ':memory:',
+      inMemory: true,
+      readonly: false,
+    })
+  })
+
+  it('reports the configured namespace as both namespace and tablePrefix', () => {
+    process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    getDb()
+    const desc = describeDb()
+    if (desc.dialect !== 'sqlite') throw new Error('expected sqlite branch')
+    expect(desc.namespace).toBe('app_authz')
+    expect(desc.tablePrefix).toBe('app_authz_')
+  })
+
+  it('reports the resolved file path from the better-sqlite3 instance, not the raw URL', () => {
+    // `sqlite:./openfga-test.db` and `file:./openfga-test.db` both
+    // round-trip through sqlitePathFromUrl() to `./openfga-test.db`.
+    // describeDb() reads from `db.name`, so the prefix is gone in the
+    // output regardless of which input form was used.
+    process.env['OPENFGA_DB_URL'] = 'file::memory:'
+    getDb()
+    const desc = describeDb()
+    if (desc.dialect !== 'sqlite') throw new Error('expected sqlite branch')
+    expect(desc.path).toBe(':memory:')
+    expect(desc.inMemory).toBe(true)
+  })
+
+  it('never includes a password field on either branch (structural guarantee)', () => {
+    // SQLite has no password concept; assert the field is absent.
+    // The Postgres branch's DescribeDbResult type has no `password`
+    // member by construction, so the assertion at the type level
+    // covers that branch — this case nails the runtime shape down.
+    getDb()
+    const desc = describeDb()
+    expect(Object.keys(desc)).not.toContain('password')
+  })
+
+  it('forces driver init when called before any other use', () => {
+    // Calling describeDb() without a prior getDb() should still work
+    // — describeDb() invokes getDb() internally to populate refs.
+    const desc = describeDb()
+    expect(desc.dialect).toBe('sqlite')
   })
 })
