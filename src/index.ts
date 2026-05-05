@@ -1,21 +1,15 @@
 /**
- * Entry point for the OpenFGA-Node-Server.
+ * Hono application instance — the entrypoint Vercel auto-detects
+ * (https://vercel.com/docs/frameworks/backend/hono) and the source of
+ * the `app` re-imported by `./server.ts` for self-hosting.
  *
- * Reads `OPENFGA_DB_URL` (Postgres DSN, must point at the openfga
- * schema from migrations/001) and starts an HTTP server on `PORT`
- * (default 8080).
+ * This file MUST stay free of socket binding, env reads with
+ * `process.exit`, or any other side effect that assumes a
+ * long-running Node process. Bootstrap concerns belong in
+ * `./server.ts`.
  */
-import { serve } from '@hono/node-server'
-import { buildApp } from './routes/index.js'
-
-const port = Number(process.env['PORT'] ?? 8080)
-
-if (!process.env['OPENFGA_DB_URL']) {
-  console.error('[openfga] OPENFGA_DB_URL is not set. Refusing to start.')
-  process.exit(1)
-}
+import { buildApp } from './routes/index'
 
 const app = buildApp()
-serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`[openfga] listening on http://0.0.0.0:${info.port}`)
-})
+
+export default app

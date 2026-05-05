@@ -18,11 +18,6 @@ server in Node, runnable anywhere Node runs.
   deployments. The reference Go server has years of optimization on
   the rewrite-algebra hot path; we have straight DFS. If your check
   QPS or model depth pushes those limits, run the Go binary.
-- Implementing every OpenFGA endpoint. The scope is the surface
-  serverless Node apps actually call: stores, models, check, write,
-  read, list-objects. `expand`, `batch-check`, `list-users`,
-  `assertions`, `changes` return `501 Not Implemented` until a
-  consumer needs them.
 - ABAC / conditional tuples. The Postgres schema reserves space for
   conditions but the evaluator ignores them. Add when needed.
 
@@ -49,13 +44,48 @@ server in Node, runnable anywhere Node runs.
 
 ### Endpoints
 
-Implemented (8): `POST /stores`,
-`{POST,GET} /stores/:storeId/authorization-models`,
-`GET /stores/:storeId/authorization-models/:id`,
-`POST /stores/:storeId/{check,write,read,list-objects}`.
+Target: full OpenFGA REST API wire compliance for the supported
+authorization model and storage semantics. Implemented endpoints must
+match OpenFGA request and response shapes so `@openfga/sdk` clients work
+unchanged.
 
-Not implemented (501): `expand`, `batch-check`, `list-users`,
-`assertions`, `changes`, `GET /stores`.
+Currently implemented:
+
+- `GET /stores` (cursor-paginated)
+- `POST /stores`
+- `{POST,GET} /stores/:storeId/authorization-models`
+- `GET /stores/:storeId/authorization-models/:id`
+- `POST /stores/:storeId/check` (with `contextual_tuples`)
+- `POST /stores/:storeId/write` (transactional, records changelog)
+- `POST /stores/:storeId/read` (cursor-paginated)
+- `POST /stores/:storeId/list-objects` (with `contextual_tuples`)
+- `POST /stores/:storeId/expand` (with `contextual_tuples`)
+- `POST /stores/:storeId/batch-check` (per-item `contextual_tuples`,
+  results keyed by `correlation_id`)
+- `POST /stores/:storeId/list-users` (userset memberships expanded
+  when `user_filter` targets the underlying user type)
+- `GET /stores/:storeId/changes` (oldest-first, polling-tail tokens,
+  `?type=` and `?start_time=` filters)
+- `{GET,PUT} /stores/:storeId/assertions/:authorizationModelId`
+- `GET /health` (auth-exempt liveness probe)
+- `GET /ready` (auth-exempt readiness probe — `200 ok` only when the
+  database is reachable and the configured namespace has the expected
+  schema; `503` with a generic `reason` otherwise)
+
+The full OpenFGA REST wire-compliance epic (`openfga-68n`) closed
+with all seven endpoint children shipped (`openfga-7ct`,
+`openfga-rvz`, `openfga-5xn`, `openfga-rae`, `openfga-bh9`,
+`openfga-hqr`) plus a `@openfga/sdk` conformance suite
+(`openfga-don`) that exercises every endpoint via the high-level
+`OpenFgaClient` over real HTTP and asserts no in-scope endpoint
+returns `501`.
+
+Cross-cutting OpenFGA-aligned features tracked separately:
+
+- `openfga-371` — OpenTelemetry HTTP instrumentation (see §OpenTelemetry observability)
+- `openfga-711` — OIDC authentication mode (`none` and `preshared`
+  modes shipped under `openfga-ywi`; OIDC layers onto the same
+  middleware dispatch — see §API caller authentication)
 
 ### Evaluation algebra
 
@@ -74,28 +104,99 @@ intersections and differences.
 
 ### Storage
 
-Postgres schema named `openfga`. Tables: `store`,
-`authorization_model`, `tuple`. Composite primary key on `tuple`
-serves as natural deduplication. Indexes on
+The storage layer is engine-agnostic, routed through Kysely. Two
+backends are supported and selected by the scheme of `OPENFGA_DB_URL`:
+
+- **Postgres** (`postgres://` / `postgresql://`) — production-
+  recommended. Tables live under the configured namespace
+  (`OPENFGA_DB_NAMESPACE`, default `openfga`) which is realized as a
+  Postgres schema. RLS is enabled with no policies — direct queries
+  from a non-service role are blocked at the database, on top of the
+  application-level boundary discipline.
+- **SQLite** (`sqlite:` / `file:` / `:memory:`) — test backend and
+  embedded-deployment option. Tables live under the configured
+  namespace which is realized as a table-name prefix (e.g.
+  `openfga_store`). RLS is unavailable; concurrency is single-writer.
+
+Tables: `store`, `authorization_model`, `tuple`. Composite primary
+key on `tuple` serves as natural deduplication. Indexes on
 `(store_id, user_str, relation)` and
 `(store_id, object_type, relation, user_str)` cover the two read
 patterns the evaluator uses.
 
-RLS is enabled with no policies — direct queries from a non-service
-role are blocked at the database, on top of the application-level
-boundary discipline.
+The full architectural decisions, dialect-portability hot spots, and
+phasing are in
+[`docs/features/db-agnosticism.md`](features/db-agnosticism.md).
+
+Self-hosted boots may opt into running migrations against the
+configured `OPENFGA_DB_URL` before binding sockets by setting
+`OPENFGA_MIGRATE_ON_START=true`. Default is `false`. The flag lives
+only in the self-host path (`src/server.ts`) and is intentionally not
+applied by `src/index.ts`, which is the Hono app file imported by
+serverless platforms. Serverless and multi-instance deployments
+should leave it disabled and continue running `pnpm migrate` as an
+explicit deploy step — concurrent boots correctly serialize on
+`kysely_migration_lock` (the Migrator's advisory lock), but every
+queued boot still pays the wait on the request-serving hot path.
+
+### API caller authentication
+
+The server supports OpenFGA-aligned API caller authentication modes:
+
+- `none` — default for private-network deployments where the server is
+  protected by platform, service mesh, or reverse-proxy controls.
+- `shared_key` — bearer-token authentication for deployments that need
+  a simple static credential at the API boundary.
+- `oidc` — JWT/OIDC validation for deployments that need issuer,
+  audience, and key-set based verification.
+
+Authentication is enforced at the HTTP middleware boundary and must not
+change OpenFGA request or response shapes for authorized calls.
+
+### Idempotency keys
+
+The server supports the `Idempotency-Key` HTTP header for mutating API
+requests so clients can safely retry requests after timeouts, network
+failures, or ambiguous connection resets.
+
+Idempotency is enforced at the HTTP middleware boundary for configured
+mutating endpoints. It must not change successful OpenFGA response
+shapes. Idempotency persistence lives alongside the OpenFGA tables in
+the configured namespace (`OPENFGA_DB_NAMESPACE`, default `openfga`)
+for operational simplicity. None of the operational tables —
+`idempotency_keys`, `tuple_change`, `assertions` — nor the Kysely
+Migrator's tracking tables (`kysely_migration`,
+`kysely_migration_lock`) are part of the OpenFGA-compatible state
+contract; the schema-compatible migration path to upstream OpenFGA is
+preserved by excluding all five at dump time. See §Migration path
+FROM this server TO upstream OpenFGA for the full recipe.
+
+### OpenTelemetry observability
+
+The server supports OpenTelemetry tracing at the HTTP middleware
+boundary. Tracing must respect incoming OpenTelemetry propagation
+headers so this server can participate in traces that started upstream.
+
+The default captured request headers must include the standard
+propagation headers `traceparent`, `tracestate`, and `baggage`.
+Operators can override captured request headers, captured response
+headers, service metadata, exporter configuration, and related
+OpenTelemetry settings through environment variables.
 
 ## Operational shape
 
-- Single Node process. No external service dependencies beyond
-  Postgres.
-- Connects as a service-role / superuser to bypass RLS. Other
-  applications sharing the same Postgres instance must use a
-  different role.
-- Connection pooling via `pg.Pool` with conservative defaults
-  (max 10, idle timeout 30s).
-- Stateless above the database — horizontal scaling works without
-  coordination.
+- Single Node process. No external service dependencies beyond the
+  configured database (Postgres or SQLite).
+- **Postgres backend**: connects as a service-role / superuser to
+  bypass RLS. Other applications sharing the same Postgres instance
+  must use a different role. Connection pooling via `pg.Pool` with
+  conservative defaults (max 10, idle timeout 30s). Stateless above
+  the database — horizontal scaling works without coordination.
+- **SQLite backend**: single-process, single-writer. WAL journal mode
+  is enabled by default for non-`:memory:` paths. Suitable for tests,
+  embedded deployments, and small single-node SaaS; not for
+  multi-instance production. The pool-tuning environment variables
+  are ignored on this backend. Horizontal scaling is not available.
 
 ## Migration path FROM this server TO upstream OpenFGA
 
@@ -104,26 +205,37 @@ operational maturity, or a need for the not-yet-implemented
 endpoints):
 
 1. Provision an upstream OpenFGA Go server with a Postgres datastore.
-2. `pg_dump --schema=openfga` from this server's database, restore
-   into the new datastore.
+2. `pg_dump` from this server's database, excluding the operational
+   and Migrator-tracking tables that aren't part of the OpenFGA
+   reference contract (substitute the configured namespace; default
+   is `openfga`):
+
+   ```sh
+   pg_dump --schema=<namespace> \
+           --exclude-table='<namespace>.idempotency_keys' \
+           --exclude-table='<namespace>.tuple_change' \
+           --exclude-table='<namespace>.assertions' \
+           --exclude-table='<namespace>.kysely_migration' \
+           --exclude-table='<namespace>.kysely_migration_lock'
+   ```
+
+   Restore the dump into the new datastore.
 3. Update the new OpenFGA server's `--datastore-uri`.
 4. Flip `OPENFGA_API_URL` on consuming applications.
 
 No application code changes. No SDK changes. No model changes.
 
+This path is **Postgres-only** — operators running the SQLite backend
+must first migrate to Postgres (manual data export / re-import via
+the application's read/write APIs) before this recipe applies.
+
 ## Future scope (non-binding)
 
 - Authorization model conditions / ABAC.
-- The remaining OpenFGA endpoints.
 - Caching layer in front of `check` (the upstream server has one).
-- Observability hooks (OpenTelemetry, structured logs at the route
-  boundary).
 - A reverse-expansion algorithm for `list-objects` that doesn't fall
   back to per-candidate `check()`.
 
 ## Out of scope
 
 - Hosted / managed offering of this server.
-- Authentication of API callers. The server trusts whatever can reach
-  it on the network. Deploy behind a reverse proxy or a service-mesh
-  ACL if you need caller auth.

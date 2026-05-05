@@ -22,3 +22,15 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.0.0 ---
+
+# --- BEGIN PROJECT VERIFY GATE (openfga-8nw) ---
+# Run the fast local gate (lint + typecheck + build + unit tests).
+# Skips when the env var is set, for emergency commits / docs-only
+# rebases where the gate would be noise. Use `git commit --no-verify`
+# to bypass entirely for one-off cases.
+if [ "$SKIP_VERIFY" = "1" ]; then
+  echo "[verify] SKIP_VERIFY=1 — skipping pnpm verify:fast"
+else
+  pnpm verify:fast || exit $?
+fi
+# --- END PROJECT VERIFY GATE ---

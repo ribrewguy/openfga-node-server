@@ -4,9 +4,19 @@
  * Per OpenFGA semantics, models are immutable once written. The latest
  * model is the active one unless a caller explicitly pins a previous
  * `authorization_model_id` on a check or write request.
+ *
+ * Routes through Kysely via `getDb()` (openfga-n0m). The `model`
+ * column is declared as `JSONColumnType` in `db-schema.ts`, so
+ * inserts pass a `JSON.stringify`'d value and selects return the
+ * parsed object — the explicit `::jsonb` cast that the legacy
+ * pg.Pool path used is no longer needed. Postgres' jsonb auto-parses
+ * on select; SQLite parses via `ParseJSONResultsPlugin` registered
+ * by `getDb()`.
  */
+import type { Selectable } from 'kysely'
 import type { AuthorizationModel, TypeDefinition, Condition } from '@openfga/sdk'
-import { getPool } from './pool'
+import { getDb } from './db'
+import type { AuthorizationModelTable } from './db-schema'
 import { generateId } from './ids'
 
 /**
@@ -24,13 +34,11 @@ export interface AuthorizationModelRow {
   created_at: string
 }
 
-interface RawRow {
-  id: string
-  store_id: string
-  schema_version: string
-  model: AuthorizationModelInput
-  created_at: string
-}
+// `Selectable<AuthorizationModelTable>` is Kysely's "row as returned
+// by a SELECT" view of the table — `Generated<T>` columns become `T`,
+// `JSONColumnType<T>` becomes the parsed `T`. Reusing this type keeps
+// the parsed-model shape declared exactly once (in db-schema.ts).
+type RawRow = Selectable<AuthorizationModelTable>
 
 function rowToModel(raw: RawRow): AuthorizationModelRow {
   return {
@@ -43,62 +51,69 @@ function rowToModel(raw: RawRow): AuthorizationModelRow {
   }
 }
 
+const MODEL_COLUMNS = ['id', 'store_id', 'schema_version', 'model', 'created_at'] as const
+
 export async function writeAuthorizationModel(
   storeId: string,
   model: AuthorizationModelInput,
 ): Promise<AuthorizationModelRow> {
   const id = generateId()
-  const pool = getPool()
-  const { rows } = await pool.query<RawRow>(
-    `INSERT INTO openfga.authorization_model (id, store_id, schema_version, model)
-     VALUES ($1, $2, $3, $4::jsonb)
-     RETURNING id, store_id, schema_version, model, created_at`,
-    [id, storeId, model.schema_version ?? '1.1', JSON.stringify(model)],
-  )
-  return rowToModel(rows[0]!)
+  const row = await getDb()
+    .insertInto('authorization_model')
+    .values({
+      id,
+      store_id: storeId,
+      schema_version: model.schema_version ?? '1.1',
+      // JSONColumnType<T> declares the insert type as `string` — the
+      // caller is responsible for stringifying. Kysely sends the
+      // string as-is to the driver, which Postgres parses into jsonb
+      // (column type does the work) and SQLite stores as TEXT (the
+      // ParseJSONResultsPlugin parses it back on read). When openfga-19w
+      // ports assertions, consider extracting a `jsonInsert<T>(value)`
+      // helper if a third JSON-column INSERT shows up.
+      model: JSON.stringify(model),
+    })
+    .returning(MODEL_COLUMNS)
+    .executeTakeFirstOrThrow()
+  return rowToModel(row)
 }
 
 export async function getAuthorizationModel(
   storeId: string,
   modelId: string,
 ): Promise<AuthorizationModelRow | null> {
-  const pool = getPool()
-  const { rows } = await pool.query<RawRow>(
-    `SELECT id, store_id, schema_version, model, created_at
-       FROM openfga.authorization_model
-      WHERE store_id = $1 AND id = $2`,
-    [storeId, modelId],
-  )
-  return rows[0] ? rowToModel(rows[0]) : null
+  const row = await getDb()
+    .selectFrom('authorization_model')
+    .select(MODEL_COLUMNS)
+    .where('store_id', '=', storeId)
+    .where('id', '=', modelId)
+    .executeTakeFirst()
+  return row ? rowToModel(row) : null
 }
 
 export async function getLatestAuthorizationModel(
   storeId: string,
 ): Promise<AuthorizationModelRow | null> {
-  const pool = getPool()
-  const { rows } = await pool.query<RawRow>(
-    `SELECT id, store_id, schema_version, model, created_at
-       FROM openfga.authorization_model
-      WHERE store_id = $1
-      ORDER BY created_at DESC
-      LIMIT 1`,
-    [storeId],
-  )
-  return rows[0] ? rowToModel(rows[0]) : null
+  const row = await getDb()
+    .selectFrom('authorization_model')
+    .select(MODEL_COLUMNS)
+    .where('store_id', '=', storeId)
+    .orderBy('created_at', 'desc')
+    .limit(1)
+    .executeTakeFirst()
+  return row ? rowToModel(row) : null
 }
 
 export async function listAuthorizationModels(
   storeId: string,
   pageSize: number,
 ): Promise<AuthorizationModelRow[]> {
-  const pool = getPool()
-  const { rows } = await pool.query<RawRow>(
-    `SELECT id, store_id, schema_version, model, created_at
-       FROM openfga.authorization_model
-      WHERE store_id = $1
-      ORDER BY created_at DESC
-      LIMIT $2`,
-    [storeId, pageSize],
-  )
+  const rows = await getDb()
+    .selectFrom('authorization_model')
+    .select(MODEL_COLUMNS)
+    .where('store_id', '=', storeId)
+    .orderBy('created_at', 'desc')
+    .limit(pageSize)
+    .execute()
   return rows.map(rowToModel)
 }

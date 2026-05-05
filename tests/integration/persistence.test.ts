@@ -1,15 +1,19 @@
 /**
  * Integration test — tuples persist across a simulated server restart.
  *
- * The "restart" is modeled by ending the pg.Pool, re-creating it, and
- * proving that the same `check()` call returns the same answer. This
- * is the durability guarantee the storage layer makes.
+ * The "restart" is modeled by tearing down the storage singleton via
+ * `resetDb()`, re-acquiring it, and proving that the same `check()`
+ * call returns the same answer. This is the durability guarantee the
+ * storage layer makes for any backend that persists data outside the
+ * process — Postgres always, file-backed SQLite when configured.
  *
- * The test is a no-op when `OPENFGA_DB_URL` is not reachable, so
- * vitest runs without a database pass silently rather than failing.
+ * Skipped on `:memory:` SQLite: a `resetDb()` against an in-process
+ * volatile store destroys the data by definition, so the durability
+ * assertion does not apply. The `integration-pg` project exercises the
+ * Postgres path; a future file-backed SQLite path could re-enable this
+ * spec locally.
  */
 import { describe, it, expect, afterAll } from 'vitest'
-import { Pool } from 'pg'
 import { transformer } from '@openfga/syntax-transformer'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -18,38 +22,22 @@ import { ModelIndex } from '../../src/evaluator/model-index'
 import { createStore } from '../../src/storage/stores'
 import { writeAuthorizationModel, getLatestAuthorizationModel } from '../../src/storage/authorization-models'
 import { writeTuples } from '../../src/storage/tuples'
-import { resetPool } from '../../src/storage/pool'
+import { resetDb } from '../../src/storage/db'
 import { pgTupleStore } from '../../src/storage/engine-context'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
 const MODEL_PATH = resolve(import.meta.dirname ?? '.', '..', 'fixtures', 'github.fga')
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.store LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
+const bootstrap = await bootstrapIntegrationDb()
 
-// Probe synchronously at module load — top-level await — so the right
-// `describe` (real or `.skip`) is registered before vitest collects.
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn('[openfga integration] OPENFGA_DB_URL unreachable or unset — skipping persistence tests.')
-}
-
-afterAll(() => {
-  if (dbAvailable) resetPool()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+// Durability tests require a backend that survives `resetDb()`. Skip
+// on `:memory:` SQLite where the entire database lives in process
+// memory and would be lost on teardown.
+const describeIfDb = bootstrap.ready && !bootstrap.inMemory ? describe : describe.skip
 
 describeIfDb('persistence', () => {
   it('tuples survive pool reset — check still returns true after reconnect', async () => {
@@ -73,7 +61,7 @@ describeIfDb('persistence', () => {
       expect(before).toBe(true)
     }
 
-    resetPool()
+    resetDb()
 
     const latest = await getLatestAuthorizationModel(store.id)
     expect(latest).not.toBeNull()
@@ -98,7 +86,7 @@ describeIfDb('persistence', () => {
       { user: `user:${adminId}`, relation: 'admin', object: 'organization:openfga' },
     ])
 
-    resetPool()
+    resetDb()
 
     const latest = await getLatestAuthorizationModel(store.id)
     const allowed = await check(

@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10'
+
+jobs:
+  lint-typecheck-build:
+    name: Lint, typecheck, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+      - run: pnpm typecheck
+
+      - run: pnpm build
+
+  test-unit:
+    # Unit tests run against in-memory SQLite. The native
+    # better-sqlite3 module compiles during pnpm install — package.json
+    # opts it into pnpm.onlyBuiltDependencies so the build runs even
+    # under --frozen-lockfile. vitest.config.ts pins
+    # OPENFGA_DB_URL=:memory: at the unit project level (since
+    # openfga-yg9), so this job needs no Postgres service.
+    name: Unit tests (SQLite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm test:unit
+
+      # End-to-end smoke of the migrate CLI against an on-disk SQLite
+      # file. The unit suite exercises the Migrator on :memory: via
+      # the bootstrap helper; this step catches issues that only show
+      # up against a file-backed database (WAL journal mode, fsync
+      # interactions, file-permission edge cases).
+      - name: Smoke-test migrate CLI on SQLite
+        env:
+          OPENFGA_DB_URL: sqlite:./ci-smoke.db
+        run: |
+          set -euo pipefail
+          rm -f ./ci-smoke.db
+          pnpm migrate up
+          pnpm migrate down
+          pnpm migrate down
+          rm -f ./ci-smoke.db ./ci-smoke.db-shm ./ci-smoke.db-wal ./ci-smoke.db-journal
+
+  test-coverage:
+    # Runs unit + integration projects (both SQLite-driven) under
+    # coverage and enforces the floors configured in vitest.config.ts.
+    # No Postgres service container — openfga-5y9 moved the integration
+    # suite to SQLite by default. The Postgres dialect-portability
+    # check lives in the `integration-pg` job below.
+    name: Tests + coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage/
+          retention-days: 14
+
+      # Publish the lcov to Codecov so the README badge has a live
+      # source. CODECOV_TOKEN is required even for public repos —
+      # Codecov's tokenless flow now rejects uploads with
+      # "Token required - not valid tokenless upload". Skipped on
+      # PRs from forks because GITHUB_TOKEN-scoped secrets are not
+      # exposed to fork runs.
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && github.event.pull_request.head.repo.fork != true }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: full
+          fail_ci_if_error: false
+
+  test-integration-pg:
+    # Re-runs the integration suite against Postgres for a
+    # dialect-portability check. Same specs as the SQLite-default
+    # `Tests + coverage` job above; the few specs gated `itIfPg`
+    # by openfga-5y9 only fire here. No coverage artifact is
+    # produced — purpose is dialect parity, not coverage numbers.
+    name: Integration tests (Postgres)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      OPENFGA_DB_URL: postgres://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm migrate up
+
+      - run: pnpm test:integration-pg

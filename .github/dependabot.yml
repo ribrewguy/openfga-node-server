@@ -1,0 +1,80 @@
+# Dependabot configuration — see openfga-mht.
+#
+# Cadence and grouping are intentionally conservative so update PRs stay
+# reviewable. Security updates are unaffected by `schedule.interval` and
+# always run as soon as an advisory lands.
+#
+# Beads ID requirement on commits is waived for Dependabot per
+# docs/policies/commits.md ("Dependabot Exception").
+
+version: 2
+
+updates:
+  # ─── npm / pnpm ────────────────────────────────────────────────────────
+  # Dependabot detects pnpm-lock.yaml automatically; the ecosystem name
+  # remains "npm" regardless of the package manager.
+  - package-ecosystem: "npm"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "dependabot"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+      include: "scope"
+    # Wait a few days before opening PRs for new releases. Filters out
+    # versions that get yanked shortly after publish.
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+      semver-minor-days: 3
+      semver-patch-days: 2
+    groups:
+      production-dependencies:
+        applies-to: version-updates
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      development-dependencies:
+        applies-to: version-updates
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ─── GitHub Actions ────────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "ci"
+      - "dependencies"
+      - "dependabot"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+      semver-minor-days: 3
+      semver-patch-days: 2
+    groups:
+      actions:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
