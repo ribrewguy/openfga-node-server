@@ -5,45 +5,29 @@
  * transactionally, the changelog is paginated newest-first with a
  * round-tripping continuation_token, the optional `type` filter
  * narrows by object type, and `start_time` admits only changes at or
- * after the timestamp. Skips silently when OPENFGA_DB_URL is
- * unreachable.
+ * after the timestamp. Runs against SQLite by default via the
+ * `integration` vitest project; the `integration-pg` project re-runs
+ * the same specs against Postgres.
  */
 import { afterAll, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
 import { writeAuthorizationModel } from '../../src/storage/authorization-models'
 import { writeTuples, deleteTuples } from '../../src/storage/tuples'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
+const bootstrap = await bootstrapIntegrationDb()
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.tuple_change LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
-
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping changes tests.',
-  )
-}
-
-afterAll(() => {
-  if (dbAvailable) resetDb()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
+// Gated pg-only: the seq-based ASC ordering depends on monotonic
+// values across writes within the same wall-clock millisecond, which
+// the SQLite path cannot satisfy at its current resolution. Tracked
+// in openfga-sp5.
+const itIfPg = bootstrap.dialect === 'postgres' ? it : it.skip
 
 interface ChangesResponse {
   changes: Array<{
@@ -128,7 +112,9 @@ describeIfDb('GET /stores/:storeId/changes', () => {
     expect(objects).toEqual(['doc:1'])
   })
 
-  it('rounds-trips continuation_token to enumerate all changes exactly once', async () => {
+  // Gated pg-only by openfga-sp5: ASC ordering by seq depends on a
+  // monotonic seq generator under same-millisecond writes.
+  itIfPg('rounds-trips continuation_token to enumerate all changes exactly once', async () => {
     const app = buildApp()
     const storeId = await setupStore()
     const recorded: Array<{ user: string, op: 'TUPLE_OPERATION_WRITE' | 'TUPLE_OPERATION_DELETE' }> = []

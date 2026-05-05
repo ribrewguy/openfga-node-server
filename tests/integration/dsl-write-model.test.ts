@@ -9,47 +9,26 @@
  *   3. application/json + JSON model           → 200 (regression — unchanged)
  *   4. application/x-openfga-dsl + invalid DSL → 400 invalid_argument
  *
- * Skips silently when OPENFGA_DB_URL is unreachable, matching the
- * existing tests/integration/persistence.test.ts pattern.
+ * Runs against SQLite by default via the `integration` vitest project;
+ * the `integration-pg` project re-runs the same specs against Postgres.
  */
 import { describe, it, expect, afterAll } from 'vitest'
-import { Pool } from 'pg'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { transformer } from '@openfga/syntax-transformer'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
 const MODEL_PATH = resolve(import.meta.dirname ?? '.', '..', 'fixtures', 'github.fga')
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.store LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
+const bootstrap = await bootstrapIntegrationDb()
 
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable or unset — skipping DSL write-model tests.',
-  )
-}
-
-afterAll(() => {
-  if (dbAvailable) resetDb()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
 
 describeIfDb('POST /stores/:storeId/authorization-models — content-type negotiation', () => {
   it('accepts a DSL body with Content-Type: application/x-openfga-dsl and the model is retrievable', async () => {

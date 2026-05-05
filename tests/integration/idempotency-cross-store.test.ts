@@ -13,42 +13,26 @@
  * fix the second call returns 422 idempotency_fingerprint_mismatch
  * rather than replaying.
  *
- * Skips silently when OPENFGA_DB_URL is unreachable. Sets
- * OPENFGA_IDEMPOTENCY_MODE=optional in beforeAll so the middleware
+ * Runs against SQLite by default via the `integration` vitest project;
+ * the `integration-pg` project re-runs the same specs against Postgres.
+ *
+ * Sets OPENFGA_IDEMPOTENCY_MODE=optional in beforeAll so the middleware
  * fires when an Idempotency-Key header is present; vitest isolates
  * env per worker process so concurrent test files are unaffected.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 import type { Hono } from 'hono'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
+const bootstrap = await bootstrapIntegrationDb()
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.idempotency_keys LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
+afterAll(async () => {
+  await bootstrap.teardown()
+})
 
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping cross-store idempotency tests.',
-  )
-}
-
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
 
 describeIfDb('openfga-fot regression — cross-store idempotency on /authorization-models', () => {
   let app: Hono
@@ -64,7 +48,7 @@ describeIfDb('openfga-fot regression — cross-store idempotency on /authorizati
   afterAll(() => {
     if (previousMode === undefined) delete process.env['OPENFGA_IDEMPOTENCY_MODE']
     else process.env['OPENFGA_IDEMPOTENCY_MODE'] = previousMode
-    resetDb()
+    // DB teardown is handled by the top-level bootstrap.teardown afterAll.
   })
 
   function writeModelReq(storeId: string, body: unknown, idempotencyKey: string): Request {

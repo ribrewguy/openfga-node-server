@@ -7,43 +7,27 @@
  * server-issued token must enumerate every store exactly once,
  * newest-first.
  *
- * Skips silently when OPENFGA_DB_URL is unreachable, matching the
- * existing integration test pattern.
+ * Runs against SQLite by default via the `integration` vitest project;
+ * the `integration-pg` project re-runs the same specs against Postgres.
  */
 import { afterAll, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
+const bootstrap = await bootstrapIntegrationDb()
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.store LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
-
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping list-stores tests.',
-  )
-}
-
-afterAll(() => {
-  if (dbAvailable) resetDb()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
+// Some specs in this file depend on strict newest-first ordering of
+// stores created within the same wall-clock millisecond, which the
+// SQLite path cannot satisfy at its current STRFTIME(%f) timestamp
+// resolution. Tracked in openfga-sp5; once that lands the gate goes
+// away and the spec runs on both dialects.
+const itIfPg = bootstrap.dialect === 'postgres' ? it : it.skip
 
 interface ListStoresResponse {
   stores: Array<{ id: string, name: string, created_at: string, updated_at: string }>
@@ -103,7 +87,9 @@ describeIfDb('GET /stores', () => {
     expect(seen).toEqual([`${tag}-only`])
   })
 
-  it('returns multiple stores newest-first', async () => {
+  // Gated pg-only by openfga-sp5: SQLite STRFTIME(%f) timestamp ties
+  // cause unstable ordering for stores created in the same millisecond.
+  itIfPg('returns multiple stores newest-first', async () => {
     const app = buildApp()
     const tag = uniqueTag()
     await createStore(`${tag}-1`)
@@ -118,7 +104,10 @@ describeIfDb('GET /stores', () => {
     expect(ours.map(s => s.name)).toEqual([`${tag}-3`, `${tag}-2`, `${tag}-1`])
   })
 
-  it('rounds-trips the continuation_token to enumerate every store exactly once', async () => {
+  // Gated pg-only by openfga-sp5: same root cause — newest-first
+  // enumeration depends on monotonic timestamps the SQLite path
+  // cannot satisfy at millisecond resolution.
+  itIfPg('rounds-trips the continuation_token to enumerate every store exactly once', async () => {
     const app = buildApp()
     const tag = uniqueTag()
     const created: string[] = []

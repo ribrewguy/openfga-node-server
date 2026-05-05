@@ -27,18 +27,44 @@ export default defineConfig({
           environment: 'node',
           include: ['tests/integration/**/*.{test,spec}.ts'],
           testTimeout: 30_000,
+          // SQLite is the default driver for integration tests too,
+          // matching the test-backend choice in docs/PRD.md:116. The
+          // suite no longer requires Postgres locally — operators can
+          // run `pnpm coverage` on a clean machine and get full
+          // feedback. The dialect-portability check against Postgres
+          // lives in the `integration-pg` project below, gated on a
+          // reachable pg URL.
+          env: {
+            OPENFGA_DB_URL: ':memory:',
+          },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          // Same specs as `integration`, run against Postgres for the
+          // dialect-portability check. Skips silently when
+          // OPENFGA_DB_URL doesn't point at a reachable Postgres
+          // instance (handled in tests/_helpers/integration-bootstrap.ts).
+          // CI's `integration-pg` job sets OPENFGA_DB_URL to the
+          // service-container Postgres and runs `pnpm migrate up`
+          // before invoking this project so the schema is ready.
+          name: 'integration-pg',
+          environment: 'node',
+          include: ['tests/integration/**/*.{test,spec}.ts'],
+          testTimeout: 30_000,
         },
       },
     ],
-    // Coverage runs against the combined unit + integration suite when
-    // `pnpm coverage` is invoked — the integration job in CI runs both
-    // projects in one go, with Postgres available, so the thresholds
-    // below assume that combined view. `pnpm coverage:unit` runs only
-    // the unit project for fast local feedback (no DB) and ignores
-    // these thresholds via the script flag.
+    // Coverage runs against the unit + integration projects (both
+    // SQLite-driven) by default. `integration-pg` is excluded from the
+    // default coverage view — it runs the same specs against Postgres
+    // and would only inflate or duplicate coverage numbers. The CI
+    // `integration-pg` job runs without `--coverage` for the same
+    // reason; its purpose is dialect-portability, not coverage.
     //
     // Thresholds are floors set ~5% below the baseline measured at
-    // bead-close time (openfga-efq) so they catch regressions without
+    // bead-close time (openfga-5y9) so they catch regressions without
     // failing day-1. Tighten these in a follow-up bead as new features
     // land with their own tests.
     coverage: {
@@ -58,23 +84,22 @@ export default defineConfig({
         'src/storage/pg-internals.ts',
       ],
       reporter: ['text-summary', 'json-summary', 'lcov', 'html'],
-      // Thresholds reflect the unit-only baseline measured under
-      // openfga-yg9 with SQLite as the default driver: storage
-      // modules largely 100% (assertions, db-schema, engine-context,
-      // ids, stores, table-prefix-plugin, authorization-models),
-      // 90%+ for dialect/idempotency, 79–82% for tuples (a few
-      // Postgres-only `getDialect()==='postgres'` branches), and
-      // ~67% for db.ts (the Postgres dialect branch in `getDb()`
-      // is unreachable in unit-only by design — covered by the
-      // integration tests in CI). `pnpm coverage:unit` flags
-      // override these to 0 for local fast feedback; `pnpm coverage`
-      // with PG in CI exercises the Postgres-only branches and
-      // comfortably exceeds these floors.
+      // Thresholds reflect the unit + sqlite-default-integration
+      // baseline measured at openfga-5y9 closure (statements 85.59,
+      // branches 74.45, functions 94.14, lines 87.75 — well above
+      // the previous unit-only baseline because integration specs
+      // now actually exercise the route+storage path on SQLite
+      // instead of silently skipping when Postgres isn't reachable).
+      // Floors set ~4–5% below the measured baseline so they catch
+      // regressions without failing on day-1 noise. The Postgres
+      // dialect branch in `getDb()` remains unreachable from the
+      // SQLite-only suite by design and is covered by the
+      // `integration-pg` project in CI.
       thresholds: {
-        statements: 70,
-        branches: 60,
-        functions: 72,
-        lines: 72,
+        statements: 80,
+        branches: 70,
+        functions: 89,
+        lines: 82,
       },
     },
   },
