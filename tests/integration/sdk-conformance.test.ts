@@ -9,41 +9,23 @@
  * behavior.
  *
  * Per openfga-don, this test must fail loudly if any in-scope
- * endpoint regresses from "implemented" to "501". Skips cleanly
- * when OPENFGA_DB_URL is unreachable, like the other integration
- * tests, so vitest works without Postgres.
+ * endpoint regresses from "implemented" to "501". Runs against SQLite
+ * by default via the `integration` vitest project; the
+ * `integration-pg` project re-runs the same specs against Postgres.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
 import { serve, type ServerType } from '@hono/node-server'
 import { OpenFgaClient } from '@openfga/sdk'
 import { buildApp } from '../../src/routes/index'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
+const bootstrap = await bootstrapIntegrationDb()
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.store LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
+afterAll(async () => {
+  await bootstrap.teardown()
+})
 
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping SDK conformance tests.',
-  )
-}
-
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
 
 describeIfDb('@openfga/sdk conformance — OpenFgaClient against a live server', () => {
   let server: ServerType
@@ -63,7 +45,7 @@ describeIfDb('@openfga/sdk conformance — OpenFgaClient against a live server',
     await new Promise<void>((resolve) => {
       server.close(() => resolve())
     })
-    resetDb()
+    // DB teardown is handled by the top-level bootstrap.teardown afterAll.
   })
 
   function clientForStore(storeId?: string, authorizationModelId?: string): OpenFgaClient {

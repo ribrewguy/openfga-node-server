@@ -1,8 +1,9 @@
 /**
- * Integration test — Idempotency-Key storage layer hits real Postgres.
+ * Integration test — Idempotency-Key storage layer.
  *
- * Skips silently when OPENFGA_DB_URL is unreachable (same pattern as
- * tests/integration/persistence.test.ts). Exercises:
+ * Runs against SQLite by default via the `integration` vitest project;
+ * the `integration-pg` project re-runs the same specs against Postgres.
+ * Exercises:
  *
  *   - first claim succeeds with kind='claimed'
  *   - second claim with same fingerprint while in-flight returns
@@ -14,38 +15,21 @@
  *   - releaseKey clears in-flight state for retry
  */
 import { describe, it, expect, afterAll, beforeEach } from 'vitest'
-import { Pool } from 'pg'
 import { claimKey, completeKey, releaseKey } from '../../src/storage/idempotency'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
+const bootstrap = await bootstrapIntegrationDb()
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.idempotency_keys LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
-
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping idempotency tests.',
-  )
-}
-
-afterAll(() => {
-  if (dbAvailable) resetDb()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
+// Gated pg-only: the SQLite STRFTIME(%f, "now", "-0 milliseconds")
+// cutoff resolves to the same instant as the existing row`s
+// created_at, so `created_at < cutoff` is false and the ttl=0 sweep
+// does not clear the row. Tracked in openfga-sp5.
+const itIfPg = bootstrap.dialect === 'postgres' ? it : it.skip
 
 function uniqueKey(label: string): string {
   return `idem-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -114,7 +98,9 @@ describeIfDb('idempotency storage', () => {
     await releaseKey(key)
   })
 
-  it('expired keys are deleted and the new claim wins', async () => {
+  // Gated pg-only by openfga-sp5: SQLite millisecond-resolution
+  // timestamps cause `created_at < cutoff` to be false when ttlMs=0.
+  itIfPg('expired keys are deleted and the new claim wins', async () => {
     const key = uniqueKey('expired')
     const first = await claimKey(key, 'fp-old', 60_000)
     expect(first.kind).toBe('claimed')

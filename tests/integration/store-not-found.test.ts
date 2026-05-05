@@ -7,42 +7,22 @@
  * delete-only /write with on_missing: 'ignore'), which Codex review
  * flagged as a wire-compat regression and a misleading client signal.
  *
- * Skips silently when OPENFGA_DB_URL is unreachable.
+ * Runs against SQLite by default via the `integration` vitest project;
+ * the `integration-pg` project re-runs the same specs against Postgres.
  */
 import { afterAll, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
 const UNKNOWN_STORE_ID = '01ZZZZZZZZZZZZZZZZZZZZZZZZ'
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.store LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
+const bootstrap = await bootstrapIntegrationDb()
 
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping store-not-found tests.',
-  )
-}
-
-afterAll(() => {
-  if (dbAvailable) resetDb()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
 
 interface RouteCase {
   method: 'GET' | 'POST' | 'PUT'

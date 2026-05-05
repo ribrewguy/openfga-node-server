@@ -6,44 +6,23 @@
  * errors, and validation rejection paths (duplicate correlation_id,
  * malformed correlation_id, batch limits).
  *
- * Skips silently when OPENFGA_DB_URL is unreachable.
+ * Runs against SQLite by default via the `integration` vitest project;
+ * the `integration-pg` project re-runs the same specs against Postgres.
  */
 import { afterAll, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
 import { writeAuthorizationModel } from '../../src/storage/authorization-models'
 import { writeTuples } from '../../src/storage/tuples'
-import { resetDb } from '../../src/storage/db'
+import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
 
-const DB_URL = process.env['OPENFGA_DB_URL']
+const bootstrap = await bootstrapIntegrationDb()
 
-async function probeDb(dsn: string): Promise<boolean> {
-  const probe = new Pool({ connectionString: dsn, connectionTimeoutMillis: 1500 })
-  try {
-    await probe.query('SELECT 1 FROM openfga.store LIMIT 1')
-    return true
-  }
-  catch {
-    return false
-  }
-  finally {
-    await probe.end().catch(() => { /* ignore */ })
-  }
-}
-
-const dbAvailable = DB_URL ? await probeDb(DB_URL) : false
-if (!dbAvailable) {
-  console.warn(
-    '[openfga integration] OPENFGA_DB_URL unreachable, unset, or migrations not applied — skipping batch-check tests.',
-  )
-}
-
-afterAll(() => {
-  if (dbAvailable) resetDb()
+afterAll(async () => {
+  await bootstrap.teardown()
 })
 
-const describeIfDb = dbAvailable ? describe : describe.skip
+const describeIfDb = bootstrap.ready ? describe : describe.skip
 
 interface BatchCheckResponse {
   result: Record<string, { allowed?: boolean, error?: { internal_error?: string } }>

@@ -122,11 +122,14 @@ correctness is preserved.
 Unit tests in `tests/unit/` cover every rewrite type for `check`,
 `list-objects`, `expand`, and `list-users` — including userset
 expansion, contextual-tuple overlays, and cycle detection.
-Integration tests in `tests/integration/` (run when `OPENFGA_DB_URL`
-is reachable) cover persistence, transactional changelog, cursor
-pagination, store-existence guards, idempotency cross-store
-isolation, and end-to-end `@openfga/sdk` conformance against a
-live HTTP listener.
+Integration tests in `tests/integration/` cover persistence,
+transactional changelog, cursor pagination, store-existence guards,
+idempotency cross-store isolation, and end-to-end `@openfga/sdk`
+conformance against a live HTTP listener. They run against in-memory
+SQLite by default (`pnpm test:integration` / `pnpm coverage` need no
+Postgres setup); the same suite re-runs against Postgres in CI as a
+dialect-portability check (`pnpm test:integration-pg` against a
+reachable `OPENFGA_DB_URL=postgres://…`).
 
 ## Idempotency keys
 

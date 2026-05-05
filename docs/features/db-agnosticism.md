@@ -167,10 +167,11 @@ The schema-mirroring constraint to upstream OpenFGA is preserved when operators 
 
 ## CI / Test Strategy
 
-- The existing **test+coverage job** continues to run against Postgres in CI. It exercises the integration project (`tests/integration/*`) plus a unit project that already covers the evaluator. No change to its shape.
-- A new **fast unit-only path** runs `pnpm test:unit` against SQLite `:memory:` per-suite. The vitest unit project gains storage-layer tests that previously could not run without Postgres. This path needs no service container and runs in seconds.
-- The `OPENFGA_DB_URL` for the SQLite path is `:memory:` by default in `vitest.config.ts`'s unit project setup; tests can override per-suite.
-- Coverage thresholds in `vitest.config.ts` will be revised upward once storage tests land — current floor is 75/68/73/78; target post-port is 85/78/82/85 (delta from the bead's "~25% toward ~90%" coverage estimate).
+- The default **test+coverage job** runs `pnpm coverage` against SQLite `:memory:` and needs no service container. It exercises the unit project plus the integration project (`tests/integration/*`), which `openfga-5y9` migrated off Postgres so the entire suite runs in-process. The Codecov upload stays on this job.
+- A separate **integration-pg job** brings up a Postgres service container, runs `pnpm migrate up`, and re-runs the integration specs against pg via the `integration-pg` vitest project. This is a dialect-portability check, not a coverage source — same specs, different dialect — so a few specs gated `itIfPg` (e.g. ordering tests that depend on monotonic timestamps) only fire here. Postgres-specific behavior guards (`openfga-5uv` timestamptz precision, `openfga-how` clock-anchored idempotency cutoff, RLS posture) are scoped to a follow-up bead (`openfga-bwu`) that adds new tests under this same `integration-pg` project.
+- A **fast unit-only path** runs `pnpm test:unit` against SQLite `:memory:` per-suite. The unit project covers storage-layer tests that previously could not run without Postgres. Faster than the full coverage path; intended for tight local feedback.
+- The `OPENFGA_DB_URL` for the unit and integration projects is `:memory:` by default in `vitest.config.ts`; tests can override per-suite.
+- Coverage thresholds in `vitest.config.ts` were re-baselined under `openfga-5y9` against the SQLite-default `pnpm coverage` run. Measured baseline: 85.59 / 74.45 / 94.14 / 87.75 (statements / branches / functions / lines). Floors: 80 / 70 / 89 / 82 (~5% headroom). Statements and branches sit slightly below the original target of 85/78/82/85 because the realized coverage distribution includes route-level integration paths in addition to unit-only storage coverage; functions and lines are at or above target.
 
 ## Operational Tradeoffs
 
