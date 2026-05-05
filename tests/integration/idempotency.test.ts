@@ -25,11 +25,6 @@ afterAll(async () => {
 })
 
 const describeIfDb = bootstrap.ready ? describe : describe.skip
-// Gated pg-only: the SQLite STRFTIME(%f, "now", "-0 milliseconds")
-// cutoff resolves to the same instant as the existing row`s
-// created_at, so `created_at < cutoff` is false and the ttl=0 sweep
-// does not clear the row. Tracked in openfga-sp5.
-const itIfPg = bootstrap.dialect === 'postgres' ? it : it.skip
 
 function uniqueKey(label: string): string {
   return `idem-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -98,9 +93,7 @@ describeIfDb('idempotency storage', () => {
     await releaseKey(key)
   })
 
-  // Gated pg-only by openfga-sp5: SQLite millisecond-resolution
-  // timestamps cause `created_at < cutoff` to be false when ttlMs=0.
-  itIfPg('expired keys are deleted and the new claim wins', async () => {
+  it('expired keys are deleted and the new claim wins', async () => {
     const key = uniqueKey('expired')
     const first = await claimKey(key, 'fp-old', 60_000)
     expect(first.kind).toBe('claimed')

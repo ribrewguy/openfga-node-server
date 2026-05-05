@@ -22,12 +22,6 @@ afterAll(async () => {
 })
 
 const describeIfDb = bootstrap.ready ? describe : describe.skip
-// Some specs in this file depend on strict newest-first ordering of
-// stores created within the same wall-clock millisecond, which the
-// SQLite path cannot satisfy at its current STRFTIME(%f) timestamp
-// resolution. Tracked in openfga-sp5; once that lands the gate goes
-// away and the spec runs on both dialects.
-const itIfPg = bootstrap.dialect === 'postgres' ? it : it.skip
 
 interface ListStoresResponse {
   stores: Array<{ id: string, name: string, created_at: string, updated_at: string }>
@@ -87,9 +81,7 @@ describeIfDb('GET /stores', () => {
     expect(seen).toEqual([`${tag}-only`])
   })
 
-  // Gated pg-only by openfga-sp5: SQLite STRFTIME(%f) timestamp ties
-  // cause unstable ordering for stores created in the same millisecond.
-  itIfPg('returns multiple stores newest-first', async () => {
+  it('returns multiple stores newest-first', async () => {
     const app = buildApp()
     const tag = uniqueTag()
     await createStore(`${tag}-1`)
@@ -104,10 +96,7 @@ describeIfDb('GET /stores', () => {
     expect(ours.map(s => s.name)).toEqual([`${tag}-3`, `${tag}-2`, `${tag}-1`])
   })
 
-  // Gated pg-only by openfga-sp5: same root cause — newest-first
-  // enumeration depends on monotonic timestamps the SQLite path
-  // cannot satisfy at millisecond resolution.
-  itIfPg('rounds-trips the continuation_token to enumerate every store exactly once', async () => {
+  it('rounds-trips the continuation_token to enumerate every store exactly once', async () => {
     const app = buildApp()
     const tag = uniqueTag()
     const created: string[] = []
