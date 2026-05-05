@@ -67,11 +67,10 @@ updates:
     commit-message:
       prefix: "chore(ci)"
       include: "scope"
+    # github-actions ecosystem only supports `default-days` under cooldown;
+    # semver-graded keys are rejected by Dependabot's schema.
     cooldown:
       default-days: 3
-      semver-major-days: 7
-      semver-minor-days: 3
-      semver-patch-days: 2
     groups:
       actions:
         applies-to: version-updates
