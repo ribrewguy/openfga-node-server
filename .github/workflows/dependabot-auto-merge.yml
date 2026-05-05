@@ -1,0 +1,108 @@
+name: Dependabot Auto-Merge
+
+# Auto-merges Dependabot PRs into develop when they match the conservative
+# eligibility matrix and CI is green. Branch protection on develop enforces
+# the CI gate. See docs/features/dependabot-auto-merge.md and
+# docs/policies/dependabot.md.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+# Top-level: revoke all permissions. Per-job grants are explicit and minimal.
+permissions: {}
+
+jobs:
+  auto-merge:
+    # Top-level actor and base-branch gate. pull_request_target runs the
+    # workflow file from the base branch, so external contributors cannot
+    # tamper with this gate from their PR head.
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.base.ref == 'develop'
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Minimum scopes for `gh pr merge --auto`: pull-requests to mark the PR,
+      # contents to allow the eventual merge commit. Nothing else.
+      pull-requests: write
+      contents: write
+
+    # Cancel any in-flight run for this PR if a new event arrives. Dependabot
+    # rebases trigger synchronize events; this avoids stacking runs.
+    concurrency:
+      group: dep-automerge-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Verify actor (defense in depth)
+        if: github.actor != 'dependabot[bot]'
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "::error::dependabot-auto-merge ran for non-Dependabot actor: $ACTOR"
+          exit 1
+
+      - name: Fetch Dependabot metadata
+        id: meta
+        # Pinned by 40-char commit SHA. Updates arrive via Dependabot.
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Apply eligibility matrix
+        id: eligibility
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEPENDENCY_TYPE: ${{ steps.meta.outputs.dependency-type }}
+          ALERT_STATE: ${{ steps.meta.outputs.alert-state }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Eligibility check (auto-merge candidate):
+          #   - update-type is patch (any ecosystem, any dependency-type), OR
+          #   - update-type is minor AND dependency-type is direct:development
+          eligible=false
+          eligible_reason=""
+          if [ "$UPDATE_TYPE" = "version-update:semver-patch" ]; then
+            eligible=true
+            eligible_reason="patch on any ecosystem"
+          elif [ "$UPDATE_TYPE" = "version-update:semver-minor" ] && [ "$DEPENDENCY_TYPE" = "direct:development" ]; then
+            eligible=true
+            eligible_reason="minor on direct:development"
+          fi
+
+          # Security override: blocks auto-merge when the PR is a security
+          # update AND the update-type is NOT patch. Security patches still
+          # auto-merge via the eligibility check above.
+          security_block=false
+          if [ -n "$ALERT_STATE" ] && [ "$UPDATE_TYPE" != "version-update:semver-patch" ]; then
+            security_block=true
+          fi
+
+          if [ "$eligible" = "true" ] && [ "$security_block" = "false" ]; then
+            decision="auto-merge"
+            reason="$eligible_reason"
+          else
+            decision="skip"
+            if [ "$security_block" = "true" ]; then
+              reason="security override (non-patch security update)"
+            elif [ "$UPDATE_TYPE" = "version-update:semver-major" ]; then
+              reason="major bump"
+            elif [ "$UPDATE_TYPE" = "version-update:semver-minor" ]; then
+              reason="minor on ${DEPENDENCY_TYPE:-unknown}"
+            else
+              reason="ineligible class (update-type=${UPDATE_TYPE:-unset})"
+            fi
+          fi
+
+          # Structured single-line log for grep-ability.
+          echo "::notice::dep-automerge pr=$PR_NUMBER decision=$decision reason=\"$reason\" update-type=$UPDATE_TYPE dependency-type=$DEPENDENCY_TYPE security=${ALERT_STATE:-none}"
+
+          echo "decision=$decision" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        if: steps.eligibility.outputs.decision == 'auto-merge'
+        env:
+          # Use the workflow's scoped token; gh reads GH_TOKEN.
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"
