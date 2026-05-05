@@ -23,11 +23,6 @@ afterAll(async () => {
 })
 
 const describeIfDb = bootstrap.ready ? describe : describe.skip
-// Gated pg-only: the seq-based ASC ordering depends on monotonic
-// values across writes within the same wall-clock millisecond, which
-// the SQLite path cannot satisfy at its current resolution. Tracked
-// in openfga-sp5.
-const itIfPg = bootstrap.dialect === 'postgres' ? it : it.skip
 
 interface ChangesResponse {
   changes: Array<{
@@ -112,9 +107,7 @@ describeIfDb('GET /stores/:storeId/changes', () => {
     expect(objects).toEqual(['doc:1'])
   })
 
-  // Gated pg-only by openfga-sp5: ASC ordering by seq depends on a
-  // monotonic seq generator under same-millisecond writes.
-  itIfPg('rounds-trips continuation_token to enumerate all changes exactly once', async () => {
+  it('rounds-trips continuation_token to enumerate all changes exactly once', async () => {
     const app = buildApp()
     const storeId = await setupStore()
     const recorded: Array<{ user: string, op: 'TUPLE_OPERATION_WRITE' | 'TUPLE_OPERATION_DELETE' }> = []

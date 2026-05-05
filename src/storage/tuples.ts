@@ -357,8 +357,13 @@ export async function listChangesPage(
       'id',
       // Cast seq to text so SQLite doesn't return it as a JS number.
       // Postgres bigserial already comes back as text via pg's default
-      // int8 parser; the cast is a no-op there.
-      sql<string>`cast(seq as text)`.as('seq'),
+      // int8 parser; the cast is a no-op there. Aliased as `seq_str`
+      // (not `seq`) so the alias does NOT shadow the underlying
+      // integer column in `ORDER BY seq` below — referencing the
+      // text alias would produce lexicographic ordering ("10" before
+      // "7"), which silently breaks pagination once the seq counter
+      // crosses a digit boundary on SQLite (openfga-sp5).
+      sql<string>`cast(seq as text)`.as('seq_str'),
       'object_type',
       'object_id',
       'relation',
@@ -381,11 +386,17 @@ export async function listChangesPage(
     query = query.where(sql<boolean>`(inserted_at, seq) > (${ts}, ${seq})`)
   }
 
-  const rows = await query
+  const rawRows = await query
     .orderBy('inserted_at', 'asc')
     .orderBy('seq', 'asc')
     .limit(pageSize + 1)
     .execute()
+
+  // Re-shape the alias to satisfy the public TupleChangeRow contract
+  // (`seq: string`). The query returns rows with `seq_str` as the
+  // text-cast cursor value; downstream callers expect the field to be
+  // named `seq`.
+  const rows: TupleChangeRow[] = rawRows.map(({ seq_str, ...rest }) => ({ ...rest, seq: seq_str }))
 
   if (rows.length <= pageSize) {
     return { rows, nextCursor: null }
