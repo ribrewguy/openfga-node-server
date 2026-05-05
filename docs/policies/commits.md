@@ -33,6 +33,8 @@ Co-authored-by: {INPUT_MODEL_NAME_VERSION_HERE} <{MODEL_COMPANY_EMAIL}>
 * Dependabot is configured via `.github/dependabot.yml` to emit Conventional Commits subjects (e.g. `chore(deps): …`, `chore(deps-dev): …`, `chore(ci): …`).
 * No exception applies to non-Dependabot commits, including squashes that incorporate Dependabot work alongside human-authored changes — those commits remain subject to the Beads ID and body requirements.
 * The Co-Author requirement does not apply to Dependabot's own commits.
+* When merging a Dependabot PR by hand, prefer the merge-commit style (not squash) so the resulting commit retains `dependabot[bot]` as author and the exemption above applies. A squash by a human relabels authorship to the human and silently revokes the exemption.
+* The auto-merge layer (see `@docs/policies/dependabot.md`) uses merge-commit style for the same reason. Acceptable scope for auto-merge is defined in that policy.
 
 ## Missing Bead Handling
 

@@ -38,6 +38,7 @@ Agents must respect:
 * `@docs/policies/code-reviews.md`
 * `@docs/policies/closeout-summaries.md`
 * `@docs/policies/commits.md`
+* `@docs/policies/dependabot.md`
 * `@docs/policies/feature-governance.md`
 * `@docs/policies/mcp.md`
 * `@docs/policies/review-summaries.md`
