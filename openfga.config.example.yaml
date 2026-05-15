@@ -71,13 +71,43 @@ log:
   level: info
 
 auth:
-  # 'none' (no auth) or 'preshared' (Bearer-token auth on /stores/*).
-  # OIDC is tracked separately (openfga-711).
+  # 'none' (no auth), 'preshared' (Bearer-token static key), or
+  # 'oidc' (Bearer-JWT validated against the issuer's JWKS).
   mode: none
+
   # Required when mode=preshared. At least one non-empty key.
   # Supports rotation: deploy with old+new, rotate clients, redeploy
   # without old.
   presharedKeys: []
+
+  # OIDC configuration. Required fields are `issuer` and `audience`
+  # when mode=oidc. See docs/features/oidc-auth.md for the full
+  # contract.
+  oidc:
+    # issuer: https://auth.example.com
+    # audience: openfga-server
+    # Optional — accept additional iss claim values (federated IdPs
+    # with multiple URLs, etc.).
+    issuerAliases: []
+    # Optional — restrict to a fixed sub allowlist. Empty = any sub
+    # the issuer signs for.
+    subjects: []
+    # Optional — restrict to a fixed client_id/azp allowlist.
+    clients: []
+    # Asymmetric algorithms only. HS* are explicitly rejected.
+    algorithms: [RS256, RS384, RS512, ES256, ES384, ES512, PS256, PS384, PS512, EdDSA]
+    # Clock skew tolerance for exp/nbf (seconds).
+    clockSkewSec: 60
+    # Optional — override OIDC discovery and point at a JWKS URI
+    # directly. When unset, the server fetches
+    # ${issuer}/.well-known/openid-configuration at boot to resolve
+    # jwks_uri.
+    # jwksUri: ''
+    # JWKS cache lifetime in ms (default 600000 = 10 minutes).
+    jwksCacheMaxAgeMs: 600000
+    # Cooldown between JWKS refetches on a kid miss, in ms (default
+    # 30000). Protects against forced-refetch abuse.
+    jwksCooldownMs: 30000
 
 idempotency:
   # 'off' (no-op) | 'optional' (honored when present) | 'required'

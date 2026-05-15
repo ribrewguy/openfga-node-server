@@ -25,6 +25,16 @@ function authHeader(scheme: string, token: string): Record<string, string> {
   return { Authorization: `${scheme} ${token}` }
 }
 
+const NO_OIDC = {
+  issuerAliases: [] as string[],
+  subjects: [] as string[],
+  clients: [] as string[],
+  algorithms: ['RS256'] as const,
+  clockSkewSec: 60,
+  jwksCacheMaxAgeMs: 600_000,
+  jwksCooldownMs: 30_000,
+} as const
+
 function buildApp(opts: { keys?: string[]; mode?: 'none' | 'preshared' }): Hono {
   const app = new Hono()
   app.use(
@@ -32,6 +42,7 @@ function buildApp(opts: { keys?: string[]; mode?: 'none' | 'preshared' }): Hono 
     authMiddleware({
       mode: opts.mode ?? 'preshared',
       presharedKeys: opts.keys ?? [KEY_A],
+      oidc: { ...NO_OIDC, algorithms: [...NO_OIDC.algorithms] },
     }),
   )
   app.get('/health', (c) => c.text('ok'))
@@ -134,7 +145,9 @@ describe('getAuthConfig + reloadConfigForTests', () => {
 
   it('defaults to none mode with no keys when nothing is set', async () => {
     await reloadConfigForTests()
-    expect(getAuthConfig()).toEqual({ mode: 'none', presharedKeys: [] })
+    const cfg = getAuthConfig()
+    expect(cfg.mode).toBe('none')
+    expect(cfg.presharedKeys).toEqual([])
   })
 
   it('rejects unknown auth modes via the schema parser', async () => {
@@ -146,10 +159,9 @@ describe('getAuthConfig + reloadConfigForTests', () => {
     process.env['OPENFGA_AUTH_MODE'] = 'preshared'
     process.env['OPENFGA_AUTH_PRESHARED_KEYS'] = ` ${KEY_A} ,  ,${KEY_B},`
     await reloadConfigForTests()
-    expect(getAuthConfig()).toEqual({
-      mode: 'preshared',
-      presharedKeys: [KEY_A, KEY_B],
-    })
+    const cfg = getAuthConfig()
+    expect(cfg.mode).toBe('preshared')
+    expect(cfg.presharedKeys).toEqual([KEY_A, KEY_B])
   })
 
   it('fails fast when preshared mode has no keys', async () => {

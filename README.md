@@ -114,6 +114,25 @@ SDK conformance suite in `tests/integration/sdk-conformance.test.ts`
 exercises every endpoint via the high-level `OpenFgaClient` over real
 HTTP and asserts no in-scope endpoint returns `501`.
 
+## API caller authentication
+
+`/stores/*` endpoints can be gated by one of three modes selected via
+`config.auth.mode` (or `OPENFGA_AUTH_MODE`). `/health` and `/ready`
+are always auth-exempt.
+
+- **`none`** (default) — no auth check; the server is expected to be
+  protected by platform, service mesh, or reverse-proxy controls.
+- **`preshared`** — `Authorization: Bearer <key>` compared against
+  one or more configured static keys. Multi-key for zero-downtime
+  rotation. See `OPENFGA_AUTH_PRESHARED_KEYS` in `.env.example`.
+- **`oidc`** — `Authorization: Bearer <jwt>` validated against the
+  configured issuer's published JWKS using the `jose` library. The
+  server runs OIDC discovery at startup, fails fast if the issuer is
+  unreachable, and refreshes JWKS on `kid` miss for key rotation.
+  See [`docs/features/oidc-auth.md`](docs/features/oidc-auth.md) for
+  the validation pipeline (iss / aud / exp / nbf / alg / optional
+  sub and client_id allowlists) and the full error-reason log table.
+
 ## Evaluation algebra
 
 The check evaluator implements the full OpenFGA rewrite-rule set:

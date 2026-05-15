@@ -120,6 +120,30 @@ export function applyEnvOverrides(raw: unknown, env: EnvLike = process.env): unk
     setPath(base, ['auth', 'presharedKeys'], parts)
   }
 
+  // ─── auth.oidc ──────────────────────────────────────────────────
+  set(['auth', 'oidc', 'issuer'], 'OPENFGA_AUTH_OIDC_ISSUER')
+  set(['auth', 'oidc', 'audience'], 'OPENFGA_AUTH_OIDC_AUDIENCE')
+  set(['auth', 'oidc', 'clockSkewSec'], 'OPENFGA_AUTH_OIDC_CLOCK_SKEW_SEC')
+  set(['auth', 'oidc', 'jwksUri'], 'OPENFGA_AUTH_OIDC_JWKS_URI')
+
+  // Comma-separated array fields for OIDC. Same split/trim/drop-empty
+  // policy as OPENFGA_AUTH_PRESHARED_KEYS.
+  for (const [envKey, configPath] of [
+    ['OPENFGA_AUTH_OIDC_ISSUER_ALIASES', ['auth', 'oidc', 'issuerAliases']],
+    ['OPENFGA_AUTH_OIDC_SUBJECTS', ['auth', 'oidc', 'subjects']],
+    ['OPENFGA_AUTH_OIDC_CLIENTS', ['auth', 'oidc', 'clients']],
+    ['OPENFGA_AUTH_OIDC_ALGORITHMS', ['auth', 'oidc', 'algorithms']],
+  ] as const) {
+    const raw = readNonEmpty(env, envKey)
+    if (raw !== undefined) {
+      const parts = raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0)
+      setPath(base, configPath as readonly string[], parts)
+    }
+  }
+
   // ─── idempotency ────────────────────────────────────────────────
   set(['idempotency', 'mode'], 'OPENFGA_IDEMPOTENCY_MODE')
   set(['idempotency', 'ttlMs'], 'OPENFGA_IDEMPOTENCY_TTL_MS')

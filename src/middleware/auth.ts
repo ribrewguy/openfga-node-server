@@ -7,26 +7,28 @@
  *   - 'none'      — no auth check (default; preserves current behavior).
  *   - 'preshared' — request must carry `Authorization: Bearer <key>`
  *                   matching one of the configured preshared keys.
- *
- * OIDC is a separate mode tracked by openfga-711; this file's
- * dispatcher leaves room for it without committing to its shape.
+ *   - 'oidc'      — request must carry a Bearer JWT validated against
+ *                   the configured issuer's JWKS (see docs/features/
+ *                   oidc-auth.md for the validation pipeline).
  *
  * Configuration: see `docs/features/configuration.md`. The relevant
- * fields are `auth.mode` and `auth.presharedKeys`. Both come from the
- * resolved `config.auth` object; env vars `OPENFGA_AUTH_MODE` and
- * `OPENFGA_AUTH_PRESHARED_KEYS` continue to work as overrides per the
+ * fields are `auth.mode`, `auth.presharedKeys`, and `auth.oidc.*`.
+ * Env vars `OPENFGA_AUTH_*` continue to work as overrides per the
  * configuration spec's env-overlay rules.
  */
 import type { MiddlewareHandler } from 'hono'
 import { timingSafeEqual } from 'node:crypto'
 import { logger } from '../logger'
 import { config } from '../config'
+import type { AuthMode, Config } from '../config-schema'
+import { oidcMiddleware } from './oidc'
 
-export type AuthMode = 'none' | 'preshared'
+export type { AuthMode } from '../config-schema'
 
 export interface AuthConfig {
   mode: AuthMode
   presharedKeys: string[]
+  oidc: Config['auth']['oidc']
 }
 
 const ENVELOPE_401 = {
@@ -42,7 +44,11 @@ const ENVELOPE_401 = {
  * via `vi.spyOn(authConfigModule, 'getAuthConfig')` if needed.
  */
 export function getAuthConfig(): AuthConfig {
-  return { mode: config.auth.mode, presharedKeys: config.auth.presharedKeys }
+  return {
+    mode: config.auth.mode,
+    presharedKeys: config.auth.presharedKeys,
+    oidc: config.auth.oidc,
+  }
 }
 
 /**
@@ -55,6 +61,10 @@ export function authMiddleware(authConfig: AuthConfig): MiddlewareHandler {
     return async (_c, next) => {
       await next()
     }
+  }
+
+  if (authConfig.mode === 'oidc') {
+    return oidcMiddleware(authConfig.oidc)
   }
 
   // Pre-encode keys to Buffers once so the request hot path is just

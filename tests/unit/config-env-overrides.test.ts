@@ -98,6 +98,26 @@ describe('applyEnvOverrides — mapping table', () => {
     const r = overlay({ OPENFGA_MIGRATE_ON_START: 'true' })
     expect(r.migrateOnStart).toBe('true')
   })
+
+  it.each([
+    ['OPENFGA_AUTH_OIDC_ISSUER', 'issuer', 'https://auth.example.com'],
+    ['OPENFGA_AUTH_OIDC_AUDIENCE', 'audience', 'openfga'],
+    ['OPENFGA_AUTH_OIDC_CLOCK_SKEW_SEC', 'clockSkewSec', '120'],
+    ['OPENFGA_AUTH_OIDC_JWKS_URI', 'jwksUri', 'https://auth.example.com/.well-known/jwks.json'],
+  ])('%s → auth.oidc.%s', (envKey, configKey, value) => {
+    const r = overlay({ [envKey]: value })
+    expect(((r.auth as Record<string, unknown>).oidc as Record<string, unknown>)[configKey]).toBe(value)
+  })
+
+  it.each([
+    ['OPENFGA_AUTH_OIDC_ISSUER_ALIASES', 'issuerAliases'],
+    ['OPENFGA_AUTH_OIDC_SUBJECTS', 'subjects'],
+    ['OPENFGA_AUTH_OIDC_CLIENTS', 'clients'],
+    ['OPENFGA_AUTH_OIDC_ALGORITHMS', 'algorithms'],
+  ])('%s splits comma-separated values into auth.oidc.%s', (envKey, configKey) => {
+    const r = overlay({ [envKey]: 'a, b,,c,' })
+    expect(((r.auth as Record<string, unknown>).oidc as Record<string, unknown>)[configKey]).toEqual(['a', 'b', 'c'])
+  })
 })
 
 describe('applyEnvOverrides — empty-string semantics', () => {

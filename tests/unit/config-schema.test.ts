@@ -211,6 +211,64 @@ describe('ConfigSchema — cross-field constraints', () => {
     const r = ConfigSchema.safeParse({ auth: { mode: 'preshared', presharedKeys: ['k1'] } })
     expect(r.success).toBe(true)
   })
+
+  it('rejects auth.mode=oidc without issuer', () => {
+    const r = ConfigSchema.safeParse({
+      auth: { mode: 'oidc', oidc: { audience: 'aud' } },
+    })
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some(i => i.message.includes('auth.oidc.issuer'))).toBe(true)
+    }
+  })
+
+  it('rejects auth.mode=oidc without audience', () => {
+    const r = ConfigSchema.safeParse({
+      auth: { mode: 'oidc', oidc: { issuer: 'https://auth.example.com' } },
+    })
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some(i => i.message.includes('auth.oidc.audience'))).toBe(true)
+    }
+  })
+
+  it('accepts auth.mode=oidc with issuer + audience set', () => {
+    const r = ConfigSchema.safeParse({
+      auth: {
+        mode: 'oidc',
+        oidc: { issuer: 'https://auth.example.com', audience: 'openfga' },
+      },
+    })
+    expect(r.success).toBe(true)
+  })
+
+  it('rejects HS256 in auth.oidc.algorithms', () => {
+    const r = ConfigSchema.safeParse({
+      auth: {
+        mode: 'oidc',
+        oidc: {
+          issuer: 'https://auth.example.com',
+          audience: 'openfga',
+          algorithms: ['HS256'],
+        },
+      },
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it('rejects empty auth.oidc.algorithms when mode=oidc', () => {
+    const r = ConfigSchema.safeParse({
+      auth: {
+        mode: 'oidc',
+        oidc: {
+          issuer: 'https://auth.example.com',
+          audience: 'openfga',
+          algorithms: [],
+        },
+      },
+    })
+    expect(r.success).toBe(false)
+  })
 })
 
 describe('ConfigSchema — enums', () => {

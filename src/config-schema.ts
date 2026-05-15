@@ -95,8 +95,23 @@ function positiveInt(fieldName: string, defaultValue: number) {
 export const LogLevels = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'] as const
 export type LogLevel = (typeof LogLevels)[number]
 
-export const AuthModes = ['none', 'preshared'] as const
+export const AuthModes = ['none', 'preshared', 'oidc'] as const
 export type AuthMode = (typeof AuthModes)[number]
+
+/**
+ * Asymmetric signing algorithms accepted by OIDC mode. HS-family
+ * (HS256/HS384/HS512) are explicitly excluded — the published JWKS
+ * surface is asymmetric by design (RFC 7517), so an HS entry in
+ * `auth.oidc.algorithms` would always fail validation and the
+ * presence of one is a config error worth surfacing at boot.
+ */
+export const OidcAlgorithms = [
+  'RS256', 'RS384', 'RS512',
+  'ES256', 'ES384', 'ES512',
+  'PS256', 'PS384', 'PS512',
+  'EdDSA',
+] as const
+export type OidcAlgorithm = (typeof OidcAlgorithms)[number]
 
 export const IdempotencyModes = ['off', 'optional', 'required'] as const
 export type IdempotencyMode = (typeof IdempotencyModes)[number]
@@ -159,10 +174,36 @@ const LogSchema = z
   })
   .prefault({} as never)
 
+const OidcSchema = z
+  .object({
+    // Required at use-site when auth.mode === 'oidc'. Optional at the
+    // schema level so non-OIDC deployments don't have to declare this
+    // block at all. The cross-field constraint in the root schema's
+    // superRefine enforces presence when the mode is 'oidc'.
+    issuer: z.string().min(1).optional(),
+    audience: z.string().min(1).optional(),
+    issuerAliases: z.array(z.string().min(1)).default([]),
+    subjects: z.array(z.string().min(1)).default([]),
+    clients: z.array(z.string().min(1)).default([]),
+    algorithms: z.array(z.enum(OidcAlgorithms)).default([...OidcAlgorithms]),
+    clockSkewSec: nonNegativeInt('auth.oidc.clockSkewSec', 60),
+    jwksUri: z.string().min(1).optional(),
+    // JWKS cache lifetime — how long a fetched JWKS is considered
+    // fresh before jose attempts a refresh. Default: 600_000 ms
+    // (10 minutes).
+    jwksCacheMaxAgeMs: nonNegativeInt('auth.oidc.jwksCacheMaxAgeMs', 600_000),
+    // Cooldown between consecutive JWKS refetches triggered by a kid
+    // miss. Prevents an attacker from forcing repeated refetches via
+    // unknown-kid tokens. Production-safe default: 30_000 ms.
+    jwksCooldownMs: nonNegativeInt('auth.oidc.jwksCooldownMs', 30_000),
+  })
+  .prefault({} as never)
+
 const AuthSchema = z
   .object({
     mode: z.enum(AuthModes).default('none'),
     presharedKeys: z.array(z.string().min(1)).default([]),
+    oidc: OidcSchema,
   })
   .prefault({} as never)
 
@@ -235,6 +276,31 @@ export const ConfigSchema = z
         message:
           'auth.mode=preshared requires auth.presharedKeys to be set with at least one non-empty key',
       })
+    }
+
+    if (cfg.auth.mode === 'oidc') {
+      if (!cfg.auth.oidc.issuer) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['auth', 'oidc', 'issuer'],
+          message: 'auth.mode=oidc requires auth.oidc.issuer to be set',
+        })
+      }
+      if (!cfg.auth.oidc.audience) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['auth', 'oidc', 'audience'],
+          message: 'auth.mode=oidc requires auth.oidc.audience to be set',
+        })
+      }
+      if (cfg.auth.oidc.algorithms.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['auth', 'oidc', 'algorithms'],
+          message:
+            'auth.mode=oidc requires auth.oidc.algorithms to contain at least one allowed algorithm',
+        })
+      }
     }
   })
 
