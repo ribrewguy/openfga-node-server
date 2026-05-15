@@ -39,9 +39,18 @@ See **Implemented endpoints** below for the supported surface.
 ```sh
 pnpm install
 
-# Configure environment. Copy the template and fill in OPENFGA_DB_URL.
+# Configure. Pick one (or both — env vars override file values):
+#   - File-based (recommended): copy openfga.config.example.yaml to
+#     openfga.config.yaml. Supports per-env override blocks
+#     ($development / $production / $test).
+cp openfga.config.example.yaml openfga.config.yaml
+$EDITOR openfga.config.yaml
+#   - Env-only (twelve-factor / platform-managed): copy .env.example
+#     to .env. Useful for Vercel, Kubernetes secrets, etc.
 cp .env.example .env
 $EDITOR .env
+# See docs/features/configuration.md for the full mapping table and
+# precedence order (defaults < file < per-env block < env vars).
 
 # (Optional) generate locally-trusted HTTPS certs via mkcert.
 # Prints the OPENFGA_TLS_* and NODE_EXTRA_CA_CERTS values to paste into .env.

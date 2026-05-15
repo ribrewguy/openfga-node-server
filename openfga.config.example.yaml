@@ -1,0 +1,124 @@
+# openfga-node-server — example configuration file
+#
+# This file is the canonical hierarchical config surface. Copy it to
+# `openfga.config.yaml` and edit the values you want to set. Every
+# field is optional; unspecified fields fall back to schema defaults
+# (see src/config-schema.ts).
+#
+# `OPENFGA_*` environment variables continue to work as overrides on
+# top of this file (see .env.example for the full mapping). The
+# precedence order is:
+#
+#   1. Zod schema defaults
+#   2. This file's base block
+#   3. The `$development` / `$production` / `$test` block matching
+#      `NODE_ENV` at startup
+#   4. `OPENFGA_*` env vars (incl. those loaded from .env)
+#   5. Test-only programmatic overrides (reloadConfigForTests)
+#
+# Documentation: docs/features/configuration.md
+
+db:
+  # Postgres DSN or SQLite path. Scheme picks the dialect:
+  #   postgres://… | postgresql://…  →  Postgres
+  #   sqlite:… | file:… | :memory:   →  SQLite
+  # Required at server boot (storage modules call requireDbUrl() at
+  # pool-open time). The load-model CLI runs without this set because
+  # it never opens the pool.
+  url: postgres://postgres:postgres@localhost:5432/openfga
+
+  # Schema namespace (Postgres) or table prefix (SQLite). Must match
+  # /^[a-z][a-z0-9_]{0,62}$/. Default: openfga.
+  namespace: openfga
+
+  # `application_name` reported in pg_stat_activity. Default:
+  # openfga-node-server.
+  applicationName: openfga-node-server
+
+  pool:
+    max: 10
+    min: 0
+    idleTimeoutMs: 30000
+    # Set connectionTimeoutMs in production (recommended: 5000) so
+    # callers don't hang indefinitely waiting on a saturated pool.
+    connectionTimeoutMs: 0
+    # Server-side statement timeout. Recommended for production
+    # (e.g. 30000) as a defensive cap against runaway evaluator
+    # queries on pathological models.
+    statementTimeoutMs: 0
+    # Client-side query timeout (enforced by `pg`).
+    queryTimeoutMs: 0
+
+listeners:
+  http:
+    # Set false to disable the HTTP listener entirely. Requires TLS
+    # files to be set; otherwise the server has no listener.
+    enabled: true
+    port: 8080
+  https:
+    # Only used when `tls.certFile` and `tls.keyFile` are both set.
+    port: 8443
+
+tls:
+  # Both must be set together (or both unset for HTTP-only). When
+  # set, an HTTPS listener is started on listeners.https.port.
+  # `pnpm cert:create` generates locally-trusted certs via mkcert.
+  # certFile: ./.certs/localhost.pem
+  # keyFile: ./.certs/localhost-key.pem
+
+log:
+  # trace | debug | info | warn | error | fatal | silent
+  level: info
+
+auth:
+  # 'none' (no auth) or 'preshared' (Bearer-token auth on /stores/*).
+  # OIDC is tracked separately (openfga-711).
+  mode: none
+  # Required when mode=preshared. At least one non-empty key.
+  # Supports rotation: deploy with old+new, rotate clients, redeploy
+  # without old.
+  presharedKeys: []
+
+idempotency:
+  # 'off' (no-op) | 'optional' (honored when present) | 'required'
+  # (scoped mutating endpoints must include Idempotency-Key).
+  mode: off
+  # Replay window in milliseconds. Must be a positive integer.
+  # Default: 86400000 (24h).
+  ttlMs: 86400000
+
+loadModel:
+  # Settings for `pnpm load-model`. Not used by the server runtime.
+  apiUrl: http://localhost:8080
+  storeName: default
+  # storeId: 01HXXX...  # Pin to an existing store id (otherwise a new one is created).
+
+# Boot-time migration gate. When true, the server runs
+# migrator.migrateToLatest() against db.url before binding sockets.
+# Default: false. Recommended OFF for multi-instance and serverless
+# deployments; prefer an explicit `pnpm migrate` deploy step there.
+migrateOnStart: false
+
+# ──────────────────────────────────────────────────────────────────
+# Per-environment overrides
+#
+# c12 selects the block matching `NODE_ENV` at startup and merges it
+# over the base block. Use these to vary log levels, pool tuning, or
+# test fixtures without per-environment env-var orchestration.
+# ──────────────────────────────────────────────────────────────────
+
+$development:
+  log:
+    level: debug
+
+$production:
+  log:
+    level: info
+  db:
+    pool:
+      connectionTimeoutMs: 5000
+      statementTimeoutMs: 30000
+
+$test:
+  db:
+    url: ':memory:'
