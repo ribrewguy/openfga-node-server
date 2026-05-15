@@ -1,7 +1,9 @@
 /**
  * Process-wide pino logger.
  *
- * Level: `OPENFGA_LOG_LEVEL` env var, falls back to `info`. Accepts
+ * Level comes from the resolved configuration's `log.level` field
+ * (env var `OPENFGA_LOG_LEVEL` overrides the configured value via
+ * the same path; see `docs/features/configuration.md`). Accepts
  * pino's standard levels: `trace`, `debug`, `info`, `warn`, `error`,
  * `fatal`, or `silent`.
  *
@@ -15,8 +17,7 @@
  * which is only true in dev. Production deployments stream JSON.
  */
 import pino from 'pino'
-
-const level = process.env['OPENFGA_LOG_LEVEL'] ?? 'info'
+import { config } from './config'
 
 const transport = process.stdout.isTTY
   ? {
@@ -29,4 +30,4 @@ const transport = process.stdout.isTTY
     }
   : undefined
 
-export const logger = pino({ level, transport })
+export const logger = pino({ level: config.log.level, transport })

@@ -11,19 +11,16 @@
  * OIDC is a separate mode tracked by openfga-711; this file's
  * dispatcher leaves room for it without committing to its shape.
  *
- * Configuration:
- *   - OPENFGA_AUTH_MODE              'none' | 'preshared'  (default 'none')
- *   - OPENFGA_AUTH_PRESHARED_KEYS    comma-separated keys; required when
- *                                    mode is 'preshared'
- *
- * The comma-separated key list mirrors the upstream Go server's
- * `--authn-preshared-keys` flag and supports zero-downtime rotation:
- * deploy with both old and new keys, rotate clients, then deploy
- * without the old key.
+ * Configuration: see `docs/features/configuration.md`. The relevant
+ * fields are `auth.mode` and `auth.presharedKeys`. Both come from the
+ * resolved `config.auth` object; env vars `OPENFGA_AUTH_MODE` and
+ * `OPENFGA_AUTH_PRESHARED_KEYS` continue to work as overrides per the
+ * configuration spec's env-overlay rules.
  */
 import type { MiddlewareHandler } from 'hono'
 import { timingSafeEqual } from 'node:crypto'
 import { logger } from '../logger'
+import { config } from '../config'
 
 export type AuthMode = 'none' | 'preshared'
 
@@ -38,31 +35,14 @@ const ENVELOPE_401 = {
 }
 
 /**
- * Read and validate auth configuration from environment variables.
- * Throws on bad config so the server fails fast at startup rather
- * than serving traffic with a misconfigured security posture.
+ * Return the resolved auth configuration. Reads from the loaded
+ * `config.auth` so env-var overrides, file-based defaults, and
+ * cross-field validation are all already applied. The function shape
+ * is kept (rather than a bare property reference) so callers can mock
+ * via `vi.spyOn(authConfigModule, 'getAuthConfig')` if needed.
  */
-export function loadAuthConfigFromEnv(): AuthConfig {
-  const rawMode = (process.env['OPENFGA_AUTH_MODE'] ?? 'none').trim().toLowerCase()
-  if (rawMode !== 'none' && rawMode !== 'preshared') {
-    throw new Error(
-      `OPENFGA_AUTH_MODE must be 'none' or 'preshared'; got "${process.env['OPENFGA_AUTH_MODE']}"`,
-    )
-  }
-  const mode = rawMode as AuthMode
-
-  const rawKeys = (process.env['OPENFGA_AUTH_PRESHARED_KEYS'] ?? '').trim()
-  const keys = rawKeys
-    ? rawKeys.split(',').map((k) => k.trim()).filter((k) => k.length > 0)
-    : []
-
-  if (mode === 'preshared' && keys.length === 0) {
-    throw new Error(
-      'OPENFGA_AUTH_MODE=preshared requires OPENFGA_AUTH_PRESHARED_KEYS to be set with at least one non-empty key',
-    )
-  }
-
-  return { mode, presharedKeys: keys }
+export function getAuthConfig(): AuthConfig {
+  return { mode: config.auth.mode, presharedKeys: config.auth.presharedKeys }
 }
 
 /**
@@ -70,8 +50,8 @@ export function loadAuthConfigFromEnv(): AuthConfig {
  * picks the implementation at composition time (server boot) so
  * the per-request hot path doesn't repeat the mode check.
  */
-export function authMiddleware(config: AuthConfig): MiddlewareHandler {
-  if (config.mode === 'none') {
+export function authMiddleware(authConfig: AuthConfig): MiddlewareHandler {
+  if (authConfig.mode === 'none') {
     return async (_c, next) => {
       await next()
     }
@@ -79,7 +59,7 @@ export function authMiddleware(config: AuthConfig): MiddlewareHandler {
 
   // Pre-encode keys to Buffers once so the request hot path is just
   // a length check + timingSafeEqual per configured key.
-  const keyBuffers = config.presharedKeys.map((k) => Buffer.from(k, 'utf8'))
+  const keyBuffers = authConfig.presharedKeys.map((k) => Buffer.from(k, 'utf8'))
 
   return async (c, next) => {
     const header = c.req.header('Authorization')

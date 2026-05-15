@@ -51,7 +51,7 @@ import { InMemoryTupleStore, unionTupleStore } from '../evaluator/tuple-store'
 import type { TupleStore } from '../evaluator/tuple-store'
 import { requestLog } from '../middleware/request-log'
 import { idempotencyMiddleware } from '../middleware/idempotency'
-import { authMiddleware, loadAuthConfigFromEnv } from '../middleware/auth'
+import { authMiddleware, getAuthConfig } from '../middleware/auth'
 import { checkReadiness } from '../storage/readiness'
 import { requireStore } from '../middleware/require-store'
 import { validate } from '../middleware/validation'
@@ -269,7 +269,7 @@ export function buildApp(): Hono {
   // reachable for liveness probes without credentials. Mode is
   // chosen at boot from OPENFGA_AUTH_MODE; see src/middleware/auth.ts
   // for the dispatch and the supported modes.
-  app.use('/stores/*', authMiddleware(loadAuthConfigFromEnv()))
+  app.use('/stores/*', authMiddleware(getAuthConfig()))
 
   // Store-existence guard. Mounted on /stores/:storeId/* so every
   // store-scoped route returns a 404 store_id_not_found before any

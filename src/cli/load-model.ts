@@ -17,9 +17,10 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { transformer } from '@openfga/syntax-transformer'
+import { config } from '../config'
 
-const API = process.env['OPENFGA_API_URL'] ?? 'http://localhost:8080'
-const STORE_NAME = process.env['OPENFGA_STORE_NAME'] ?? 'default'
+const API = config.loadModel.apiUrl
+const STORE_NAME = config.loadModel.storeName
 
 async function main() {
   const dslPath = process.argv[2]
@@ -31,7 +32,7 @@ async function main() {
   const dsl = readFileSync(resolve(process.cwd(), dslPath), 'utf8')
   const modelJson = transformer.transformDSLToJSONObject(dsl)
 
-  let storeId = process.env['OPENFGA_STORE_ID']?.trim()
+  let storeId = config.loadModel.storeId
   if (!storeId) {
     const res = await fetch(`${API}/stores`, {
       method: 'POST',

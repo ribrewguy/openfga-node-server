@@ -10,9 +10,10 @@
  * as inline literals. Both choices are deliberate so static-analysis
  * scanners do not flag the test fixtures as hard-coded credentials.
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { Hono } from 'hono'
-import { authMiddleware, loadAuthConfigFromEnv } from '../../src/middleware/auth'
+import { authMiddleware, getAuthConfig } from '../../src/middleware/auth'
+import { reloadConfigForTests } from '../../src/config'
 
 const KEY_A = 'fixture-key-A'
 const KEY_B = 'fixture-key-B'
@@ -114,33 +115,46 @@ describe('authMiddleware — preshared mode', () => {
   })
 })
 
-describe('loadAuthConfigFromEnv', () => {
+describe('getAuthConfig + reloadConfigForTests', () => {
+  const ENV_KEYS = ['OPENFGA_AUTH_MODE', 'OPENFGA_AUTH_PRESHARED_KEYS'] as const
+  const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
+
   beforeEach(() => {
-    delete process.env['OPENFGA_AUTH_MODE']
-    delete process.env['OPENFGA_AUTH_PRESHARED_KEYS']
+    for (const k of ENV_KEYS) saved[k] = process.env[k]
+    for (const k of ENV_KEYS) delete process.env[k]
   })
 
-  it('defaults to none mode with no keys when nothing is set', () => {
-    expect(loadAuthConfigFromEnv()).toEqual({ mode: 'none', presharedKeys: [] })
+  afterEach(async () => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
+    await reloadConfigForTests()
   })
 
-  it('rejects unknown auth modes', () => {
+  it('defaults to none mode with no keys when nothing is set', async () => {
+    await reloadConfigForTests()
+    expect(getAuthConfig()).toEqual({ mode: 'none', presharedKeys: [] })
+  })
+
+  it('rejects unknown auth modes via the schema parser', async () => {
     process.env['OPENFGA_AUTH_MODE'] = 'oidc-experimental'
-    expect(() => loadAuthConfigFromEnv()).toThrow(/OPENFGA_AUTH_MODE must be/)
+    await expect(reloadConfigForTests()).rejects.toThrow()
   })
 
-  it('parses comma-separated keys with trim and empty-token filtering', () => {
+  it('parses comma-separated keys with trim and empty-token filtering', async () => {
     process.env['OPENFGA_AUTH_MODE'] = 'preshared'
     process.env['OPENFGA_AUTH_PRESHARED_KEYS'] = ` ${KEY_A} ,  ,${KEY_B},`
-    expect(loadAuthConfigFromEnv()).toEqual({
+    await reloadConfigForTests()
+    expect(getAuthConfig()).toEqual({
       mode: 'preshared',
       presharedKeys: [KEY_A, KEY_B],
     })
   })
 
-  it('fails fast when preshared mode has no keys', () => {
+  it('fails fast when preshared mode has no keys', async () => {
     process.env['OPENFGA_AUTH_MODE'] = 'preshared'
     process.env['OPENFGA_AUTH_PRESHARED_KEYS'] = '   '
-    expect(() => loadAuthConfigFromEnv()).toThrow(/at least one non-empty key/)
+    await expect(reloadConfigForTests()).rejects.toThrow(/at least one/)
   })
 })

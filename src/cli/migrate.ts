@@ -28,8 +28,14 @@
  * Migrator tracking tables are not part of the OpenFGA-compatible
  * state contract.
  */
-import 'dotenv/config'
 import { type MigrationResultSet } from 'kysely'
+// Importing `../config` triggers c12-backed .env loading via the
+// configuration spec's `dotenv: true` option, replacing the previous
+// `import 'dotenv/config'` side effect at the top of this file. The
+// resetDb import below transitively requires `config.db.url` to be
+// set, so the load also surfaces missing-config failures at the same
+// fail-fast boundary as before.
+import '../config'
 import { resetDb } from '../storage/db'
 import { buildMigrator } from '../storage/migrator'
 

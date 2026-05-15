@@ -7,11 +7,17 @@
  * top-level await. If parsing fails, the module logs the formatted
  * Zod error tree to stderr and exits the process with code 1.
  *
- * Tests that need to construct a `Config` without triggering this
- * module's side effects import `loadAndParseConfig` directly. That
- * helper is the same logic without the `process.exit(1)` on failure;
- * it throws a `ZodError` instead so callers can assert on the failure
- * shape.
+ * The `config` export is a Proxy over an internal mutable singleton
+ * so tests that mutate `process.env` (or other inputs) can call
+ * `reloadConfigForTests()` to re-run the full load pipeline against
+ * the updated environment. Production code never sees the Proxy
+ * shape — it dereferences fields exactly as if `config` were a plain
+ * frozen object.
+ *
+ * Tests that need to construct a `Config` without going through any
+ * file/env discovery import `loadAndParseConfig` directly. That
+ * helper is the pure-async core; it throws a `ZodError` on failure
+ * instead of exiting the process.
  *
  * The module structure separation is documented in
  * `docs/features/configuration.md` §"Test Strategy".
@@ -24,8 +30,8 @@ export type { Config } from './config-schema'
 
 export interface LoadAndParseOptions {
   /**
-   * Working directory passed to c12. Defaults to `process.cwd()`. Tests
-   * point this at a fixture directory containing an
+   * Working directory passed to c12. Defaults to `process.cwd()`.
+   * Tests point this at a fixture directory containing an
    * `openfga.config.yaml`.
    */
   cwd?: string
@@ -41,6 +47,13 @@ export interface LoadAndParseOptions {
    * declares as required without setting an env var or fixture file.
    */
   overrides?: Record<string, unknown>
+  /**
+   * Whether c12 should auto-load `.env` files. Defaults to `true`.
+   * Tests that mutate `process.env` and expect those mutations to
+   * win over the repo's `.env` set this to `false` so c12 does not
+   * overwrite test-set env vars from the on-disk file.
+   */
+  dotenv?: boolean
 }
 
 /**
@@ -62,7 +75,7 @@ export async function loadAndParseConfig(opts: LoadAndParseOptions = {}): Promis
   const { config: raw } = await loadConfig({
     name: 'openfga',
     cwd: opts.cwd,
-    dotenv: true,
+    dotenv: opts.dotenv ?? true,
     rcFile: false,
     globalRc: false,
     packageJson: false,
@@ -85,13 +98,51 @@ async function loadOrExit(): Promise<Config> {
   }
   catch (err) {
     // The logger may not be initialized yet (logger reads from
-    // config). Fall back to console.error and stderr for the
-    // pre-init failure path, matching the existing fail-fast
-    // pattern in src/server.ts.
+    // config). Fall back to console.error for the pre-init failure
+    // path, matching the existing fail-fast pattern in src/server.ts.
     console.error('[openfga] invalid configuration:')
     console.error(err instanceof Error ? err.message : err)
     process.exit(1)
   }
 }
 
-export const config: Config = await loadOrExit()
+let _internal: Config = await loadOrExit()
+
+/**
+ * Resolved, validated configuration. Exposed as a Proxy over an
+ * internal mutable singleton so `reloadConfigForTests()` can swap
+ * the live value without invalidating import bindings. Consumers
+ * read `config.db.url`, `config.idempotency.ttlMs`, etc. exactly as
+ * they would a plain object.
+ */
+export const config: Config = new Proxy({} as Config, {
+  get(_target, prop, _receiver) {
+    return (_internal as unknown as Record<string | symbol, unknown>)[prop]
+  },
+  has(_target, prop) {
+    return prop in (_internal as unknown as object)
+  },
+  ownKeys() {
+    return Reflect.ownKeys(_internal as unknown as object)
+  },
+  getOwnPropertyDescriptor(_target, prop) {
+    return Reflect.getOwnPropertyDescriptor(_internal as unknown as object, prop)
+  },
+})
+
+/**
+ * Test-only: re-run the full load pipeline against the current
+ * `process.env` and replace the internal config the `config` Proxy
+ * reflects. Use in tests that mutate `OPENFGA_*` env vars before
+ * exercising code paths that consume `config`.
+ *
+ * Production code does NOT call this. The exported name carries the
+ * `ForTests` suffix as a readability and grep affordance — any
+ * non-test caller is a smell.
+ */
+export async function reloadConfigForTests(opts: LoadAndParseOptions = {}): Promise<void> {
+  // Default `dotenv: false` for test reloads so the repo's `.env` file
+  // does not overwrite mutations the test made to `process.env`. Tests
+  // that explicitly want `.env` behavior pass `{ dotenv: true }`.
+  _internal = await loadAndParseConfig({ dotenv: false, ...opts })
+}

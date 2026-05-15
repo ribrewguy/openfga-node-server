@@ -23,9 +23,6 @@ importers:
       c12:
         specifier: ^3.3.4
         version: 3.3.4(magicast@0.5.2)
-      dotenv:
-        specifier: ^17.4.2
-        version: 17.4.2
       hono:
         specifier: ^4.6.14
         version: 4.12.16
