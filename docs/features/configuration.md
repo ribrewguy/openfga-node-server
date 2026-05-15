@@ -55,7 +55,7 @@ await loadConfig({
   name: 'openfga',
   dotenv: true,
   rcFile: false,        // disable .openfgarc / ~/.openfgarc
-  globalRC: false,      // disable global RC discovery
+  globalRc: false,      // disable global RC discovery
   packageJson: false,   // disable package.json `openfga` config field
 })
 ```
@@ -236,7 +236,7 @@ const { config: raw } = await loadConfig<unknown>({
   name: 'openfga',
   dotenv: true,
   rcFile: false,
-  globalRC: false,
+  globalRc: false,
   packageJson: false,
 })
 
