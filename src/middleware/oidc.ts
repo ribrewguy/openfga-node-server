@@ -113,18 +113,31 @@ function reject(c: Context, ctx: LogContext, reason: string, extra: Record<strin
  * before any listener binds. Per-request validation runs entirely
  * via jose.jwtVerify against the constructed JWKS.
  */
+type JwksReady =
+  | { ok: true, jwks: JWTVerifyGetKey }
+  | { ok: false, err: unknown }
+
 export function oidcMiddleware(oidc: OidcConfig): MiddlewareHandler {
-  // Resolve discovery synchronously (well — eagerly) at factory call
-  // time so a misconfigured issuer fails fast at boot rather than
-  // surfacing on the first request. The async resolution is wrapped
-  // in a promise the middleware awaits on first use; if the promise
-  // rejects the middleware returns a 503-shaped 401 (same envelope,
-  // server-side logged as oidc_discovery_failed) but the boot path
-  // should have already awaited buildJWKS() before binding sockets.
-  const jwksReady = buildJWKS(oidc).catch((err: unknown) => {
-    logger.fatal({ err, reason: 'oidc_discovery_failed' }, 'oidc_setup_failed')
-    throw err instanceof OidcDiscoveryError ? err : new OidcDiscoveryError(String(err))
-  })
+  // Kick off JWKS resolution at factory time so a follow-up request
+  // doesn't pay the cold-start cost. The result is materialized into
+  // a *non-rejecting* promise — Node's unhandled-rejection signal
+  // fires for promises whose rejection nobody has awaited yet, so a
+  // raw rejected promise here would crash the process on boot when
+  // discovery fails even though we intend to surface the failure
+  // per-request below. The sentinel pattern keeps the promise
+  // resolved-always; the middleware checks .ok at request time.
+  //
+  // For fail-fast boot behavior, callers should await
+  // prefetchOidcJwks(oidc) BEFORE binding any listener so the
+  // OidcDiscoveryError is observed by the bootstrap rather than the
+  // first request handler.
+  const jwksReady: Promise<JwksReady> = buildJWKS(oidc).then(
+    (jwks): JwksReady => ({ ok: true, jwks }),
+    (err: unknown): JwksReady => {
+      logger.fatal({ err, reason: 'oidc_discovery_failed' }, 'oidc_setup_failed')
+      return { ok: false, err }
+    },
+  )
 
   const issuerAccepts = [
     oidc.issuer!, // schema enforces presence
@@ -149,13 +162,11 @@ export function oidcMiddleware(oidc: OidcConfig): MiddlewareHandler {
       return reject(c, ctx, 'missing_authorization')
     }
 
-    let jwks: JWTVerifyGetKey
-    try {
-      jwks = await jwksReady
+    const ready = await jwksReady
+    if (!ready.ok) {
+      return reject(c, ctx, 'jwks_unavailable', { err: errString(ready.err) })
     }
-    catch (err) {
-      return reject(c, ctx, 'jwks_unavailable', { err: errString(err) })
-    }
+    const jwks = ready.jwks
 
     let payload: JWTPayload
     try {
@@ -194,6 +205,27 @@ export function oidcMiddleware(oidc: OidcConfig): MiddlewareHandler {
 }
 
 /**
+ * Boot-time fail-fast helper. Server bootstrap awaits this before
+ * binding any listener so an unreachable OIDC issuer surfaces as a
+ * FATAL log at boot rather than as 401s on every authenticated
+ * request. Throws `OidcDiscoveryError` on failure.
+ *
+ * The middleware factory itself runs an independent lazy promise so
+ * non-server callers (e.g., tests that mount the middleware directly
+ * onto a Hono router) continue to work without a separate prefetch
+ * step.
+ */
+export async function prefetchOidcJwks(oidc: OidcConfig): Promise<void> {
+  try {
+    await buildJWKS(oidc)
+  }
+  catch (err) {
+    if (err instanceof OidcDiscoveryError) throw err
+    throw new OidcDiscoveryError(String(err))
+  }
+}
+
+/**
  * Eagerly build the remote JWKS so the boot path can await it. The
  * function returned by createRemoteJWKSet is a stable reference that
  * memoizes fetches internally via the configured cacheMaxAge and
@@ -226,6 +258,11 @@ function classifyJoseError(err: unknown): string {
   if (err instanceof joseErrors.JOSEAlgNotAllowed) return 'alg_disallowed'
   if (err instanceof joseErrors.JWKSNoMatchingKey) return 'signature_invalid'
   if (err instanceof joseErrors.JWKSMultipleMatchingKeys) return 'signature_invalid'
+  // Network failures fetching the JWKS during per-request verification
+  // surface as raw TypeError from Node's fetch (jose doesn't wrap
+  // them). Classify these as jwks_unavailable so operators see the
+  // right reason in logs rather than the misleading 'jwt_malformed'.
+  if (err instanceof TypeError && /fetch failed/i.test(err.message)) return 'jwks_unavailable'
   if (err instanceof joseErrors.JWSInvalid || err instanceof joseErrors.JWTInvalid) return 'jwt_malformed'
   return 'jwt_malformed'
 }

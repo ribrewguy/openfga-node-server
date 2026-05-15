@@ -30,6 +30,7 @@ import { config } from './config'
 import { applyMigrationsOnStartIfEnabled } from './storage/migrate-on-start'
 import { describeDb, requireDbUrl } from './storage/db'
 import { checkReadiness } from './storage/readiness'
+import { prefetchOidcJwks } from './middleware/oidc'
 
 try {
   requireDbUrl(config.db.url)
@@ -37,6 +38,23 @@ try {
 catch (err) {
   logger.fatal({ err }, 'required configuration not set; refusing to start')
   process.exit(1)
+}
+
+// When OIDC auth is enabled, resolve issuer discovery + JWKS BEFORE
+// binding any listener. A misconfigured issuer (typo, network
+// partition, unpublished `.well-known/openid-configuration`) must
+// surface as a FATAL boot log rather than as 401s on every
+// authenticated request. The Hono middleware factory has its own
+// lazy promise for non-server callers, but the production boot path
+// is intentionally fail-fast.
+if (config.auth.mode === 'oidc') {
+  try {
+    await prefetchOidcJwks(config.auth.oidc)
+  }
+  catch (err) {
+    logger.fatal({ err, reason: 'oidc_discovery_failed' }, 'oidc_setup_failed; refusing to start')
+    process.exit(1)
+  }
 }
 
 // Run migrations against the configured database before binding
