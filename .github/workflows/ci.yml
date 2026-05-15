@@ -33,6 +33,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
+
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm lint
@@ -61,6 +67,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
@@ -102,6 +114,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
@@ -168,6 +186,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
