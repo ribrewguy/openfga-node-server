@@ -82,6 +82,15 @@ export default defineConfig({
         // parsers; intFromEnv helper). The pg branch is exercised
         // by integration tests in CI, not by unit-only tests.
         'src/storage/pg-internals.ts',
+        // OpenTelemetry SDK adapter — initOtelSdk + buildExporter /
+        // buildSampler / buildPropagator are thin shims over the
+        // third-party @opentelemetry/sdk-node packages, exercised
+        // only when otel.enabled is true. Disabled-path behavior
+        // (the production default + every unit test) is covered by
+        // tests/unit/otel-helper.test.ts. SDK-driven verification
+        // belongs in a follow-up integration test that boots the
+        // SDK against InMemorySpanExporter; tracked separately.
+        'src/observability/otel.ts',
       ],
       reporter: ['text-summary', 'json-summary', 'lcov', 'html'],
       // Thresholds reflect the unit + sqlite-default-integration
