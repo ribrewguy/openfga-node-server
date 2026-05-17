@@ -2,7 +2,9 @@
   <title>NodeFGA</title>
   <desc>A four-node graph whose three edges trace the letter N.</desc>
   <defs>
-    <linearGradient id="nodefga-grad" x1="0" y1="0" x2="1" y2="1">
+    <!-- userSpaceOnUse so vertical/horizontal strokes (zero-width
+         object bounding boxes) still receive a visible gradient. -->
+    <linearGradient id="nodefga-grad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="200" y2="200">
       <stop offset="0%" stop-color="#646cff"/>
       <stop offset="100%" stop-color="#9499ff"/>
     </linearGradient>
