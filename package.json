@@ -21,7 +21,10 @@
     "verify": "pnpm lint && pnpm typecheck && pnpm build && pnpm coverage",
     "load-model": "tsx src/cli/load-model.ts",
     "migrate": "tsx src/cli/migrate.ts",
-    "cert:create": "node scripts/setup-tls.mjs"
+    "cert:create": "node scripts/setup-tls.mjs",
+    "docs:dev": "vitepress dev docs-site",
+    "docs:build": "vitepress build docs-site",
+    "docs:preview": "vitepress preview docs-site"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.0",
@@ -58,6 +61,7 @@
     "tsx": "^4.19.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.1",
+    "vitepress": "^1.6.4",
     "vitest": "^4.1.4"
   },
   "pnpm": {
