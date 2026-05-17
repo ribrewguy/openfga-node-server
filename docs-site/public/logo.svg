@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="NodeFGA logo">
   <title>NodeFGA</title>
+  <desc>A four-node graph whose three edges trace the letter N.</desc>
   <defs>
     <linearGradient id="nodefga-grad" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#646cff"/>
@@ -7,17 +8,20 @@
     </linearGradient>
   </defs>
 
-  <!-- Edges first so node fills sit on top of stroke ends -->
-  <g stroke="url(#nodefga-grad)" stroke-width="8" stroke-linecap="round" fill="none">
-    <line x1="50" y1="60"  x2="150" y2="60"/>
-    <line x1="50" y1="60"  x2="100" y2="155"/>
-    <line x1="150" y1="60" x2="100" y2="155"/>
+  <!-- Edges trace the strokes of the letter N: left vertical, top-left
+       diagonal down to bottom-right, then right vertical. Drawn first so
+       node fills sit on top of stroke ends. -->
+  <g stroke="url(#nodefga-grad)" stroke-width="10" stroke-linecap="round" fill="none">
+    <line x1="42" y1="160" x2="42"  y2="42"/>
+    <line x1="42" y1="42"  x2="158" y2="158"/>
+    <line x1="158" y1="158" x2="158" y2="42"/>
   </g>
 
-  <!-- Three connected nodes: user / object / relation triad -->
+  <!-- Four nodes at the corners. -->
   <g fill="url(#nodefga-grad)">
-    <circle cx="50"  cy="60"  r="22"/>
-    <circle cx="150" cy="60"  r="22"/>
-    <circle cx="100" cy="155" r="22"/>
+    <circle cx="42"  cy="42"  r="20"/>
+    <circle cx="158" cy="42"  r="20"/>
+    <circle cx="42"  cy="158" r="20"/>
+    <circle cx="158" cy="158" r="20"/>
   </g>
 </svg>
