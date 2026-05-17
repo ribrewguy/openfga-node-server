@@ -2,274 +2,77 @@
 
 [![codecov](https://codecov.io/gh/ribrewguy/openfga-node-server/graph/badge.svg)](https://codecov.io/gh/ribrewguy/openfga-node-server)
 
-OpenFGA-wire-compatible authorization server in Node. Drop-in for the
-OpenFGA reference (Go) server for the surface this project implements.
+**NodeFGA** — fine-grained, relationship-based authorization for Node.
+Built on the OpenFGA authorization-model semantics; runs anywhere Node
+runs.
 
-Built to fill a gap: serverless-friendly Node deployments (Vercel, Fly,
-Cloud Run, etc.) often can't run the Go binary as a sidecar, and the
-managed offerings (Auth0 FGA / openfga.cloud) aren't always the right
-shape. This server runs anywhere Node runs and talks the OpenFGA HTTP
-protocol byte-for-byte.
+📖 **Full documentation:** [ribrewguy.github.io/openfga-node-server](https://ribrewguy.github.io/openfga-node-server/)
 
-State is stored via a Kysely-typed storage layer with two supported
-backends:
-
-- **Postgres** (production-recommended) — schema mirrors the upstream
-  OpenFGA reference schema, so a future migration to the Go server is
-  `pg_dump --schema=openfga` (excluding the operational tables that
-  aren't part of the OpenFGA reference contract; see
-  [Migrating to upstream OpenFGA](#migrating-to-upstream-openfga))
-  plus an env-var flip.
-- **SQLite** (test backend; embedded-deployment option) — for unit
-  tests, single-process embedded use, and small SaaS deployments
-  where Postgres is overkill. The upstream-migration `pg_dump` path
-  is not available on this backend.
-
-The backend is selected from the scheme of `OPENFGA_DB_URL`; no
-separate driver flag.
+The published docs cover configuration, authentication modes, observability,
+deployment runbooks, recipes, and the migration path to upstream OpenFGA.
+This README is intentionally short — it's a starting point, not a
+duplicate of the docs site.
 
 ## Status
 
-Prototype. The full OpenFGA REST surface is implemented and SDK
-conformance tests pass against it (see openfga-68n).
-See **Implemented endpoints** below for the supported surface.
+Prototype. The OpenFGA REST surface this project implements is wired
+end-to-end and the SDK conformance suite passes against it. See
+[bd](https://github.com/steveasleep/beads) (`bd list`) for the live work
+queue.
 
 ## Quick start
 
 ```sh
 pnpm install
 
-# Configure. Pick one (or both — env vars override file values):
-#   - File-based (recommended): copy openfga.config.example.yaml to
-#     openfga.config.yaml. Supports per-env override blocks
-#     ($development / $production / $test).
+# Configure (file is canonical; env vars override file values).
 cp openfga.config.example.yaml openfga.config.yaml
-$EDITOR openfga.config.yaml
-#   - Env-only (twelve-factor / platform-managed): copy .env.example
-#     to .env. Useful for Vercel, Kubernetes secrets, etc.
-cp .env.example .env
-$EDITOR .env
-# See docs/features/configuration.md for the full mapping table and
-# precedence order (defaults < file < per-env block < env vars).
+$EDITOR openfga.config.yaml         # set db.url at minimum
 
-# (Optional) generate locally-trusted HTTPS certs via mkcert.
-# Prints the OPENFGA_TLS_* and NODE_EXTRA_CA_CERTS values to paste into .env.
-pnpm cert:create
-
-# Apply schema migrations.
+# Apply schema.
 pnpm migrate up
 
-# Boot the server.
+# Boot.
 pnpm dev
 
-# In another shell: load the example model.
+# In another shell — load the example authorization model.
 pnpm load-model tests/fixtures/github.fga
-# (Copy the printed OPENFGA_STORE_ID into your environment for subsequent calls.)
 ```
 
-## Configuration
-
-The full set of environment variables — required, optional, defaults,
-and tuning knobs for the connection pool — is documented inline in
-[`.env.example`](.env.example). Copy it to `.env` for local dev; the
-server loads it automatically via `dotenv/config`.
-
-The minimum required for the server to start is `OPENFGA_DB_URL`.
-
-## Implemented endpoints
-
-| Method | Path | Notes |
-|---|---|---|
-| `GET`  | `/stores` | List stores, newest first. Cursor-paginated via `continuation_token`. |
-| `POST` | `/stores` | Create a store. Idempotent. |
-| `POST` | `/stores/:storeId/authorization-models` | Write a new authorization model (immutable). Idempotent. Accepts `application/json` (default) or `application/x-openfga-dsl` / `text/plain` (DSL — server-side compile). |
-| `GET`  | `/stores/:storeId/authorization-models` | List models, newest first. |
-| `GET`  | `/stores/:storeId/authorization-models/:id` | Read a specific model. |
-| `POST` | `/stores/:storeId/check` | Authorization check. Honors `contextual_tuples`. |
-| `POST` | `/stores/:storeId/write` | Write or delete tuples. Idempotent. Records changes transactionally for `/changes`. |
-| `POST` | `/stores/:storeId/read` | Read tuples (filterable). Cursor-paginated via `continuation_token`. |
-| `POST` | `/stores/:storeId/list-objects` | List objects of a type a user has a relation on. Honors `contextual_tuples`. |
-| `POST` | `/stores/:storeId/expand` | Returns the userset tree for a (object, relation). Honors `contextual_tuples`. |
-| `POST` | `/stores/:storeId/batch-check` | Up to 50 checks in one request, results keyed by `correlation_id`. Per-item `contextual_tuples`. |
-| `POST` | `/stores/:storeId/list-users` | List users with a relation on an object. Filter by user type/relation; userset memberships expanded. Honors `contextual_tuples`. |
-| `GET`  | `/stores/:storeId/changes` | Tuple changelog, oldest-first. Cursor-paginated; supports `?type=` filter and `?start_time=` cutoff. Polling-tail token semantics. |
-| `GET`  | `/stores/:storeId/assertions/:authorizationModelId` | Read assertion set for a model. |
-| `PUT`  | `/stores/:storeId/assertions/:authorizationModelId` | Upsert assertions for a model. |
-| `GET`  | `/health` | Liveness check (auth-exempt). |
-
-"Idempotent" endpoints honor the `Idempotency-Key` HTTP header. See
-[Idempotency keys](#idempotency-keys) below.
-
-The write-model endpoint also accepts the OpenFGA DSL directly. Set
-`Content-Type: application/x-openfga-dsl` (or `text/plain`) and POST
-`.fga` bytes; the server compiles them via `@openfga/syntax-transformer`
-and produces the same `{ "authorization_model_id": "<id>" }` response
-as the JSON path. DSL parse errors return `400 invalid_argument` with
-line/column information. The JSON path is unchanged — `@openfga/sdk`
-clients work as before. See
-[`docs/features/dsl-write-model.md`](docs/features/dsl-write-model.md).
-
-All routes above are wire-compatible with `@openfga/sdk` — the
-SDK conformance suite in `tests/integration/sdk-conformance.test.ts`
-exercises every endpoint via the high-level `OpenFgaClient` over real
-HTTP and asserts no in-scope endpoint returns `501`.
-
-## API caller authentication
-
-`/stores/*` endpoints can be gated by one of three modes selected via
-`config.auth.mode` (or `OPENFGA_AUTH_MODE`). `/health` and `/ready`
-are always auth-exempt.
-
-- **`none`** (default) — no auth check; the server is expected to be
-  protected by platform, service mesh, or reverse-proxy controls.
-- **`preshared`** — `Authorization: Bearer <key>` compared against
-  one or more configured static keys. Multi-key for zero-downtime
-  rotation. See `OPENFGA_AUTH_PRESHARED_KEYS` in `.env.example`.
-- **`oidc`** — `Authorization: Bearer <jwt>` validated against the
-  configured issuer's published JWKS using the `jose` library. The
-  server runs OIDC discovery at startup, fails fast if the issuer is
-  unreachable, and refreshes JWKS on `kid` miss for key rotation.
-  See [`docs/features/oidc-auth.md`](docs/features/oidc-auth.md) for
-  the validation pipeline (iss / aud / exp / nbf / alg / optional
-  sub and client_id allowlists) and the full error-reason log table.
-
-## Observability
-
-OpenTelemetry tracing is **off by default**. Setting
-`config.otel.enabled = true` (or `OPENFGA_OTEL_ENABLED=true`)
-initializes the SDK at boot — before listeners bind — and emits
-spans at every instrumented boundary.
-
-Boundaries are independently gated via `config.otel.spans.*`:
-
-- `http` — the Hono request lifecycle (`@hono/otel`). Continues
-  upstream W3C `traceparent` / `baggage` context.
-- `evaluator` — `check`, `expand`, `list-objects`, `list-users`,
-  `batch-check`.
-- `storage` — `read_tuples`, `apply_tuple_mutations`, `list_changes`,
-  `load_model_index`.
-- `auth` and `idempotency` — middleware decision spans (planned;
-  see the spec's follow-up section).
-
-Exporter, sampler, propagators, header capture, and resource
-attributes are configurable. Sensitive headers (`authorization`,
-`cookie`, etc.) cannot be added to the capture lists — Zod rejects
-them at config-load. See [`docs/features/opentelemetry.md`](docs/features/opentelemetry.md)
-for the full span catalog, configuration surface, and security model.
-
-## Evaluation algebra
-
-The check evaluator implements the full OpenFGA rewrite-rule set:
-
-- `this` — direct relation (incl. typed wildcards `<type>:*` and
-  userset references `<type>:<id>#<relation>`).
-- `computedUserset` — alias to another relation on the same object.
-- `tupleToUserset` — "X from Y" — for each tuple via Y, evaluate X.
-- `union`, `intersection`, `difference`.
-
-`list-objects` is a forward-walk reverse expansion that filters
-candidates through `check()` so `intersection` and `difference`
-correctness is preserved.
-
-Unit tests in `tests/unit/` cover every rewrite type for `check`,
-`list-objects`, `expand`, and `list-users` — including userset
-expansion, contextual-tuple overlays, and cycle detection.
-Integration tests in `tests/integration/` cover persistence,
-transactional changelog, cursor pagination, store-existence guards,
-idempotency cross-store isolation, and end-to-end `@openfga/sdk`
-conformance against a live HTTP listener. They run against in-memory
-SQLite by default (`pnpm test:integration` / `pnpm coverage` need no
-Postgres setup); the same suite re-runs against Postgres in CI as a
-dialect-portability check (`pnpm test:integration-pg` against a
-reachable `OPENFGA_DB_URL=postgres://…`).
-
-## Idempotency keys
-
-Mutating endpoints (`POST /stores`, `POST /stores/:storeId/authorization-models`,
-`POST /stores/:storeId/write`) honor the `Idempotency-Key` HTTP header
-so clients can safely retry after timeouts, dropped connections, or
-ambiguous responses.
-
-The middleware is opt-in. Set `OPENFGA_IDEMPOTENCY_MODE` to control
-rollout:
-
-| Mode | Behavior |
-|---|---|
-| `off` (default) | Middleware is a no-op. Existing clients are unaffected. |
-| `optional` | `Idempotency-Key` is honored when present, ignored when absent. |
-| `required` | Scoped mutating requests must include `Idempotency-Key`; missing keys return `400`. |
-
-Replay semantics, within `OPENFGA_IDEMPOTENCY_TTL_MS` (default 24 h):
-
-| Situation | Result |
-|---|---|
-| Same key, same request body | Cached response is replayed. |
-| Same key, in-flight retry | `409 idempotency_in_flight`. |
-| Same key, different request body | `422 idempotency_fingerprint_mismatch`. |
-| Idempotency store unavailable | `503 idempotency_store_unavailable`. |
-
-Idempotency state lives in `<namespace>.idempotency_keys` (where
-`<namespace>` is the value of `OPENFGA_DB_NAMESPACE`, default
-`openfga`). It is **not** part of the OpenFGA-compatible state
-contract — see
-[Migrating to upstream OpenFGA](#migrating-to-upstream-openfga) for
-the full exclude list.
-
-See [`docs/features/idemnpotency-keys.md`](docs/features/idemnpotency-keys.md)
-for the full specification.
-
-## Migrating to upstream OpenFGA
-
-This path is **Postgres-only** — SQLite has no `pg_dump` analog. If
-you're running the SQLite backend and want to move to the upstream Go
-server, you'll need to bring up a Postgres backend on this server
-first, then follow this recipe.
-
-The configured namespace (default `openfga`) mirrors the upstream
-OpenFGA reference schema for the tables that ARE part of the wire
-contract (`store`, `authorization_model`, `tuple`). Three additional
-tables back this server's operational features and are NOT part of
-the reference contract; the Kysely Migrator's two tracking tables are
-also excluded since they're not OpenFGA state:
-
-| Table | Backs |
-|---|---|
-| `<namespace>.idempotency_keys` | `Idempotency-Key` HTTP header (see [Idempotency keys](#idempotency-keys)) |
-| `<namespace>.tuple_change` | `GET /stores/:storeId/changes` changelog with deterministic per-insertion ordering |
-| `<namespace>.assertions` | `GET/PUT /stores/:storeId/assertions/:authorizationModelId` |
-| `<namespace>.kysely_migration` | Kysely Migrator's applied-migrations tracking |
-| `<namespace>.kysely_migration_lock` | Kysely Migrator's advisory-lock row |
-
-When migrating to the upstream OpenFGA Go server, exclude all five
-tables from the dump (substitute your configured namespace for
-`<namespace>`; the default is `openfga`):
+The server listens on `:8080`. Liveness check:
 
 ```sh
-pg_dump --schema=<namespace> \
-        --exclude-table='<namespace>.idempotency_keys' \
-        --exclude-table='<namespace>.tuple_change' \
-        --exclude-table='<namespace>.assertions' \
-        --exclude-table='<namespace>.kysely_migration' \
-        --exclude-table='<namespace>.kysely_migration_lock'
+curl http://localhost:8080/health
+# {"status":"ok"}
 ```
 
-The migration files for each operational table document the same
-recipe inline — see `migrations/1777824000000_idempotency-keys.ts`,
-`migrations/1777910400000_tuple-changes.ts`, and
-`migrations/1777996800000_assertions.ts`.
+For everything else — full configuration surface, auth setup, OpenTelemetry
+wiring, production deployment runbooks, worked-example recipes — see the
+[documentation site](https://ribrewguy.github.io/openfga-node-server/).
 
-## Status: tradeoffs of the current implementation
+## Repository layout
 
-- **No graph-traversal optimizations.** Straight DFS. Acceptable at
-  prototype scale; revisit if check latency becomes a hot path.
-- **`list-objects` filters via `check()`.** O(candidates × check).
-  Same prototype-scale acceptance.
-- **No conditional tuples / ABAC.** The schema reserves space for
-  conditions but the evaluator ignores them. Add when you need them.
+- `src/` — server source (routes, evaluator, storage, middleware).
+- `tests/` — unit + integration tests, SDK conformance suite.
+- `migrations/` — Kysely-typed schema migrations.
+- `docs/` — internal specs (PRD, architecture, feature specs, policies). Not
+  shipped to the docs site.
+- `docs-site/` — published documentation (VitePress, deployed to GitHub
+  Pages by `.github/workflows/docs.yml`).
 
-## Design
+## Development
 
-See [`docs/PRD.md`](docs/PRD.md) for the project's guiding goals,
-non-goals, and the migration path to the upstream OpenFGA Go server
-(which is `pg_dump --schema=openfga` plus an env-var flip on
-consuming applications).
+```sh
+pnpm verify             # lint, typecheck, build, tests + coverage
+pnpm verify:fast        # lint, typecheck, build, unit tests
+pnpm test               # unit + integration
+pnpm docs:dev           # local docs preview (http://localhost:5173)
+```
+
+Workflow conventions — branches, commits, beads, code reviews — live under
+[`docs/policies/`](docs/policies/). `CLAUDE.md` is the agent-facing index
+into those policies.
+
+## License
+
+MIT.
