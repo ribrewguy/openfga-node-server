@@ -7,6 +7,7 @@
  * is immutable once written, so we cache by id.
  */
 import { ModelIndex } from '../evaluator/model-index'
+import { traced } from '../observability/otel'
 import { getAuthorizationModel, getLatestAuthorizationModel } from './authorization-models'
 import {
   listAllForRelation,
@@ -21,17 +22,25 @@ export async function loadModelIndex(
   storeId: string,
   modelId: string | undefined,
 ): Promise<{ modelId: string, index: ModelIndex } | null> {
-  const row = modelId
-    ? await getAuthorizationModel(storeId, modelId)
-    : await getLatestAuthorizationModel(storeId)
-  if (!row) return null
-  const cacheKey = `${storeId}:${row.id}`
-  let index = _modelCache.get(cacheKey)
-  if (!index) {
-    index = new ModelIndex(row.type_definitions)
-    _modelCache.set(cacheKey, index)
-  }
-  return { modelId: row.id, index }
+  return traced(
+    'storage',
+    'openfga.storage.load_model_index',
+    () => ({ 'openfga.store_id': storeId, 'openfga.model_id': modelId ?? '' }),
+    async (span) => {
+      const row = modelId
+        ? await getAuthorizationModel(storeId, modelId)
+        : await getLatestAuthorizationModel(storeId)
+      if (!row) return null
+      span.setAttribute('openfga.model_id', row.id)
+      const cacheKey = `${storeId}:${row.id}`
+      let index = _modelCache.get(cacheKey)
+      if (!index) {
+        index = new ModelIndex(row.type_definitions)
+        _modelCache.set(cacheKey, index)
+      }
+      return { modelId: row.id, index }
+    },
+  )
 }
 
 /** Test-only. */

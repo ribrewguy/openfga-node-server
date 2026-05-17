@@ -15,6 +15,7 @@ import { listObjects } from '../evaluator/list-objects'
 import { listUsers } from '../evaluator/list-users'
 import { loadModelIndex, pgTupleStore } from '../storage/engine-context'
 import { validate } from '../middleware/validation'
+import { traced } from '../observability/otel'
 import {
   BatchCheckBody,
   CheckBody,
@@ -33,7 +34,16 @@ evaluationRoutes.post('/stores/:storeId/check', validate('json', CheckBody), asy
   const ctx = await loadModelIndex(storeId, body.authorization_model_id)
   if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
   const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples?.tuple_keys)
-  const allowed = await check(ctx.index, store, tk.user, tk.relation, tk.object)
+  const allowed = await traced(
+    'evaluator',
+    'openfga.evaluator.check',
+    () => ({ 'openfga.store_id': storeId, 'openfga.model_id': ctx.modelId }),
+    async (span) => {
+      const result = await check(ctx.index, store, tk.user, tk.relation, tk.object)
+      span.setAttribute('openfga.allowed', result)
+      return result
+    },
+  )
   return c.json({ allowed })
 })
 
@@ -43,7 +53,21 @@ evaluationRoutes.post('/stores/:storeId/list-objects', validate('json', ListObje
   const ctx = await loadModelIndex(storeId, body.authorization_model_id)
   if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
   const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples?.tuple_keys)
-  const ids = await listObjects(ctx.index, store, body.user, body.relation, body.type)
+  const ids = await traced(
+    'evaluator',
+    'openfga.evaluator.list_objects',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.model_id': ctx.modelId,
+      'openfga.type': body.type,
+      'openfga.relation': body.relation,
+    }),
+    async (span) => {
+      const result = await listObjects(ctx.index, store, body.user, body.relation, body.type)
+      span.setAttribute('openfga.result_count', result.length)
+      return result
+    },
+  )
   return c.json({ objects: ids.map(id => `${body.type}:${id}`) })
 })
 
@@ -56,13 +80,27 @@ evaluationRoutes.post('/stores/:storeId/list-users', validate('json', ListUsersB
   // ListUsersRequest's contextual_tuples is a flat array (unlike
   // check/list-objects) — adapt to the same overlay helper.
   const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples)
-  const users = await listUsers(
-    ctx.index,
-    store,
-    body.object.type,
-    body.object.id,
-    body.relation,
-    body.user_filters[0]!,
+  const users = await traced(
+    'evaluator',
+    'openfga.evaluator.list_users',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.model_id': ctx.modelId,
+      'openfga.object_type': body.object.type,
+      'openfga.relation': body.relation,
+    }),
+    async (span) => {
+      const result = await listUsers(
+        ctx.index,
+        store,
+        body.object.type,
+        body.object.id,
+        body.relation,
+        body.user_filters[0]!,
+      )
+      if (result !== null) span.setAttribute('openfga.result_count', result.length)
+      return result
+    },
   )
   if (users === null) {
     return c.json({
@@ -89,7 +127,17 @@ evaluationRoutes.post('/stores/:storeId/expand', validate('json', ExpandBody), a
   }
 
   const store = withContextualTuples(pgTupleStore(storeId), body.contextual_tuples?.tuple_keys)
-  const root = await expand(ctx.index, store, objectType, objectId, body.tuple_key.relation)
+  const root = await traced(
+    'evaluator',
+    'openfga.evaluator.expand',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.model_id': ctx.modelId,
+      'openfga.object_type': objectType,
+      'openfga.relation': body.tuple_key.relation,
+    }),
+    () => expand(ctx.index, store, objectType, objectId, body.tuple_key.relation),
+  )
   if (root === null) {
     return c.json({
       code: 'invalid_argument',
@@ -105,28 +153,40 @@ evaluationRoutes.post('/stores/:storeId/batch-check', validate('json', BatchChec
   const ctx = await loadModelIndex(storeId, body.authorization_model_id)
   if (!ctx) return c.json({ code: 'not_found', message: 'authorization model not found' }, 404)
 
-  const result: Record<string, { allowed?: boolean, error?: { internal_error: string } }> = {}
-  for (const item of body.checks) {
-    const store = withContextualTuples(pgTupleStore(storeId), item.contextual_tuples?.tuple_keys)
-    try {
-      const allowed = await check(
-        ctx.index,
-        store,
-        item.tuple_key.user,
-        item.tuple_key.relation,
-        item.tuple_key.object,
-      )
-      result[item.correlation_id] = { allowed }
-    }
-    catch (err) {
-      // Per-item errors do not fail the whole batch — clients receive
-      // the success/failure of each item by correlation_id. Shape
-      // errors (malformed tuple_key, bad correlation_id) are caught at
-      // the validation boundary before this handler runs.
-      result[item.correlation_id] = {
-        error: { internal_error: err instanceof Error ? err.message : 'check failed' },
+  const result = await traced(
+    'evaluator',
+    'openfga.evaluator.batch_check',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.model_id': ctx.modelId,
+      'openfga.batch_size': body.checks.length,
+    }),
+    async () => {
+      const acc: Record<string, { allowed?: boolean, error?: { internal_error: string } }> = {}
+      for (const item of body.checks) {
+        const store = withContextualTuples(pgTupleStore(storeId), item.contextual_tuples?.tuple_keys)
+        try {
+          const allowed = await check(
+            ctx.index,
+            store,
+            item.tuple_key.user,
+            item.tuple_key.relation,
+            item.tuple_key.object,
+          )
+          acc[item.correlation_id] = { allowed }
+        }
+        catch (err) {
+          // Per-item errors do not fail the whole batch — clients receive
+          // the success/failure of each item by correlation_id. Shape
+          // errors (malformed tuple_key, bad correlation_id) are caught at
+          // the validation boundary before this handler runs.
+          acc[item.correlation_id] = {
+            error: { internal_error: err instanceof Error ? err.message : 'check failed' },
+          }
+        }
       }
-    }
-  }
+      return acc
+    },
+  )
   return c.json({ result })
 })

@@ -1,4 +1,4 @@
-# OpenTelemetry
+# OpenTelemetry Observability
 
 ## Status
 
@@ -6,160 +6,223 @@ Proposed.
 
 ## Source of Truth
 
-- PRD: `docs/PRD.md`, "OpenTelemetry observability".
-- Middleware: `@hono/otel` HTTP instrumentation middleware.
-- Propagation standards: W3C Trace Context and W3C Baggage through OpenTelemetry propagation.
+- PRD: `docs/PRD.md` §"OpenTelemetry observability" (L174-184).
+- HTTP middleware: `@hono/otel` for the request-response boundary.
+- Internal-boundary spans: `@opentelemetry/api` `tracer.startActiveSpan` wrapped in a thin in-repo helper.
+- SDK: `@opentelemetry/sdk-node` + the trace OTLP exporters; standard `OTEL_*` env vars apply.
+- Propagation: W3C Trace Context + W3C Baggage.
 
 ## Business Intent
 
-Deployments need request traces that connect the authorization server to upstream application traffic. When a client request arrives with existing OpenTelemetry trace context, this server should continue that trace rather than starting an unrelated trace. Operators also need configurable span metadata, exporter settings, and header capture behavior without code changes.
+Deployments need request traces that connect this authorization server to upstream application traffic AND illuminate where time goes inside the server when a check is slow. The HTTP-only instrumentation that this spec originally proposed answered the first need but not the second — a 300ms `check` request showed up as one 300ms span with no breakdown.
 
-The implementation should use Hono's OpenTelemetry middleware rather than custom request tracing. It should configure header capture intentionally because the middleware does not capture request or response headers by default.
+This feature instruments at every internal AND external API boundary: HTTP request handling, auth, idempotency, evaluator entry points (check, expand, list-objects, list-users, batch-check), and storage reads / writes / changelog. Each boundary is a separate granular knob in configuration so operators can turn off categories whose signal volume isn't worth the cost.
+
+OpenTelemetry is **off by default**. Enabling it must not change OpenFGA request or response shapes for authorized calls. Every configuration lever is surfaced via the c12 + Zod schema landed under openfga-iie.
 
 ## Goals
 
-- Add OpenTelemetry tracing for the Hono request-response lifecycle.
-- Respect incoming propagation context from standard headers.
-- Capture the standard propagation request headers by default as span attributes:
-  - `traceparent`
-  - `tracestate`
-  - `baggage`
-- Let operators override captured request and response headers through environment variables.
-- Let operators configure service metadata, exporter endpoint, sampling, and related OpenTelemetry settings without code changes.
-- Avoid capturing secrets or high-risk headers by default.
+- **Off by default**. `config.otel.enabled = false` leaves runtime behavior identical to today; the SDK is not imported at all in that path.
+- **External boundary**: install `@hono/otel` to trace the Hono request-response lifecycle. Respect incoming W3C `traceparent` / `tracestate` / `baggage`.
+- **Internal boundaries**: wrap evaluator entry points (check, expand, listObjects, listUsers, batchCheck), storage entry points (read tuples, write tuples, list changes, load model index, store CRUD, assertion CRUD), and middleware decisions (auth dispatch outcome, idempotency claim/complete/release) with named spans carrying boundary-specific attributes.
+- **Per-boundary knobs**. `config.otel.spans.{http,evaluator,storage,auth,idempotency}` independently gates each category so an operator can keep HTTP spans on while turning off the storage-layer firehose.
+- **Configurable exporter**. OTLP-HTTP (default when enabled), OTLP-gRPC, and console exporters. Endpoint, headers, and timeout are surfaced via config; standard `OTEL_*` env vars work too.
+- **Configurable sampler**. `always_on` (default), `always_off`, `parentbased_always_on`, `traceidratio`, `parentbased_traceidratio`. Sampler ratio is configurable.
+- **Configurable propagators**. Defaults to `tracecontext` + `baggage`. Operators can opt in to additional propagators.
+- **Configurable header capture**. Request defaults to `traceparent` / `tracestate` / `baggage`. Response defaults to empty. Sensitive headers (`authorization`, `cookie`, etc.) explicitly rejected at config-load if listed in capture.
+- **Bundle hygiene**. The OTel SDK and its transitive deps are dynamic-imported only when `config.otel.enabled === true`, so the disabled-mode build/start path is unchanged.
 
 ## Non-Goals
 
-- Do not add fine-grained spans inside evaluator or storage internals in the initial feature.
-- Do not capture all request headers by default.
-- Do not capture `authorization`, cookies, shared keys, or idempotency keys by default.
-- Do not require an OpenTelemetry collector for local development.
-- Do not change OpenFGA API request or response shapes.
+- **No metrics**. This feature ships traces only. A future bead may add a metrics pipeline using the same SDK plumbing.
+- **No log signal export**. This feature does not pipe pino logs into the OTel logs pipeline. Existing structured logging stays as the canonical low-cardinality operational log.
+- **No automatic instrumentation packages**. `@opentelemetry/auto-instrumentations-node` is not used — we want the spans we emit to be intentional, scoped to our boundaries, and named consistently. Auto-instrumenting `pg`, `node:http`, and friends would produce noise that competes with the in-repo spans.
+- **No span-attribute capture of OpenFGA tuple data by default**. Spans carry route, store id, model id, and counts — not user identifiers, relations, or object refs — unless the operator opts in. Tuple data is potentially sensitive (PII-adjacent in many deployments).
+- **No PRD changes**. PRD §"OpenTelemetry observability" already names the surface; this feature implements it.
 
-## Middleware Behavior
+## Configuration Surface
 
-Use `@hono/otel` HTTP instrumentation middleware for Hono route tracing.
+Extends `openfga.config.yaml` with a top-level `otel` section:
 
-The middleware should be registered early enough to cover authentication, idempotency, route handling, and error responses. It should not prevent existing request logging from running.
+```yaml
+otel:
+  # Master switch. Off by default. When false, the SDK is never
+  # imported and no spans are emitted.
+  enabled: false
 
-Incoming propagation context must be extracted from request headers before the server span starts. At minimum, the implementation must support:
+  service:
+    # Reported as service.name in resource attributes. Default:
+    # 'openfga-node-server'.
+    name: openfga-node-server
+    # Reported as service.version. Defaults to package.json version
+    # when unset.
+    version: ''
 
-- W3C Trace Context: `traceparent`, `tracestate`.
-- W3C Baggage: `baggage`.
+  resource:
+    # Additional resource attributes (key→string). Merged on top of
+    # service.name/version. Use for environment, region, etc.
+    attributes: {}
 
-Header propagation and header capture are separate concerns:
+  exporter:
+    # otlp-http (default) | otlp-grpc | console | none
+    type: otlp-http
+    # OTLP endpoint URL. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or
+    # OTEL_EXPORTER_OTLP_TRACES_ENDPOINT when unset.
+    endpoint: ''
+    # Static headers attached to OTLP exports (e.g. for auth tokens).
+    # Falls back to OTEL_EXPORTER_OTLP_HEADERS when unset.
+    headers: {}
+    # Timeout per export request, in milliseconds.
+    timeoutMs: 10000
 
-- Propagation links this server's span to an upstream trace.
-- Capture records selected request or response headers as span attributes.
+  propagators:
+    # W3C defaults. Other supported values: 'b3', 'b3multi',
+    # 'jaeger', 'ottrace'.
+    - tracecontext
+    - baggage
 
-The implementation must not rely on header capture for trace propagation.
+  sampler:
+    # always_on (default) | always_off | parentbased_always_on |
+    # traceidratio | parentbased_traceidratio
+    type: always_on
+    # Used by traceidratio and parentbased_traceidratio. 0.0-1.0.
+    ratio: 1.0
 
-## Default Header Capture
+  capture:
+    # Captured request headers (recorded as span attributes).
+    requestHeaders: [traceparent, tracestate, baggage]
+    # Captured response headers. Default: empty.
+    responseHeaders: []
 
-Default captured request headers:
+  # Per-boundary span gates. All default true when otel.enabled is
+  # true. Setting any to false suppresses that boundary's spans.
+  spans:
+    http: true          # External boundary — Hono request lifecycle.
+    evaluator: true     # Internal — check, expand, list_objects,
+                        # list_users, batch_check.
+    storage: true       # Internal — every TupleStore + storage
+                        # operation (read, write, list_changes,
+                        # load_model_index, stores, assertions).
+    auth: true          # Internal — auth dispatch outcome span.
+    idempotency: true   # Internal — claim/complete/release/replay.
+```
 
-- `traceparent`
-- `tracestate`
-- `baggage`
+## Env-Var Override Mapping
 
-Default captured response headers:
+Every `OPENFGA_OTEL_*` variable maps onto the nested config path. The `OTEL_*` standard variables continue to be honored by the SDK natively (we don't re-read them) and are documented here for operator convenience.
 
-- None.
+| Env var | Config path |
+|---|---|
+| `OPENFGA_OTEL_ENABLED` | `otel.enabled` |
+| `OPENFGA_OTEL_SERVICE_NAME` | `otel.service.name` |
+| `OPENFGA_OTEL_SERVICE_VERSION` | `otel.service.version` |
+| `OPENFGA_OTEL_EXPORTER_TYPE` | `otel.exporter.type` |
+| `OPENFGA_OTEL_EXPORTER_ENDPOINT` | `otel.exporter.endpoint` |
+| `OPENFGA_OTEL_EXPORTER_TIMEOUT_MS` | `otel.exporter.timeoutMs` |
+| `OPENFGA_OTEL_PROPAGATORS` | `otel.propagators` (comma-string → string[]) |
+| `OPENFGA_OTEL_SAMPLER_TYPE` | `otel.sampler.type` |
+| `OPENFGA_OTEL_SAMPLER_RATIO` | `otel.sampler.ratio` |
+| `OPENFGA_OTEL_CAPTURE_REQUEST_HEADERS` | `otel.capture.requestHeaders` (comma-string → string[]) |
+| `OPENFGA_OTEL_CAPTURE_RESPONSE_HEADERS` | `otel.capture.responseHeaders` (comma-string → string[]) |
+| `OPENFGA_OTEL_SPANS_HTTP` | `otel.spans.http` |
+| `OPENFGA_OTEL_SPANS_EVALUATOR` | `otel.spans.evaluator` |
+| `OPENFGA_OTEL_SPANS_STORAGE` | `otel.spans.storage` |
+| `OPENFGA_OTEL_SPANS_AUTH` | `otel.spans.auth` |
+| `OPENFGA_OTEL_SPANS_IDEMPOTENCY` | `otel.spans.idempotency` |
 
-The implementation may add response headers later if a concrete operational use case exists. It must not capture sensitive response headers by default.
+Standard `OTEL_*` env vars (honored by the SDK directly): `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_PROPAGATORS`, `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`. When both project-specific and standard variables target the same setting, the project-specific value wins.
 
-## Configuration
+## Span Catalog
 
-Use project-specific environment variables for application behavior and standard OpenTelemetry environment variables where they fit directly.
+Span names follow `openfga.<boundary>.<operation>` with attributes carrying boundary-specific context. Sensitive fields (tuple users, relations, raw bodies) are NOT captured.
 
-Project-specific variables:
+**External (`otel.spans.http`):** `@hono/otel` emits the root server span per request with route, method, status code, and configured captured headers as attributes.
 
-- `OPENFGA_OTEL_ENABLED`: Enables or disables OpenTelemetry middleware. Default: `false`.
-- `OPENFGA_OTEL_SERVICE_NAME`: Service name. Default: `openfga-node-server`.
-- `OPENFGA_OTEL_SERVICE_VERSION`: Service version. Default: package version when available.
-- `OPENFGA_OTEL_CAPTURE_REQUEST_HEADERS`: Comma-separated request headers to capture. Default: `traceparent,tracestate,baggage`.
-- `OPENFGA_OTEL_CAPTURE_RESPONSE_HEADERS`: Comma-separated response headers to capture. Default: empty.
-- `OPENFGA_OTEL_SPAN_NAME_MODE`: Span naming strategy. Default: middleware route naming.
+**Internal — evaluator (`otel.spans.evaluator`):**
 
-OpenTelemetry-aligned variables:
+| Span name | Attributes |
+|---|---|
+| `openfga.evaluator.check` | `openfga.store_id`, `openfga.model_id`, `openfga.allowed` (boolean) |
+| `openfga.evaluator.expand` | `openfga.store_id`, `openfga.model_id`, `openfga.object_type`, `openfga.relation` |
+| `openfga.evaluator.list_objects` | `openfga.store_id`, `openfga.model_id`, `openfga.type`, `openfga.relation`, `openfga.result_count` |
+| `openfga.evaluator.list_users` | `openfga.store_id`, `openfga.model_id`, `openfga.object_type`, `openfga.relation`, `openfga.result_count` |
+| `openfga.evaluator.batch_check` | `openfga.store_id`, `openfga.model_id`, `openfga.batch_size` |
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT`
-- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
-- `OTEL_EXPORTER_OTLP_HEADERS`
-- `OTEL_SERVICE_NAME`
-- `OTEL_RESOURCE_ATTRIBUTES`
-- `OTEL_PROPAGATORS`
-- `OTEL_TRACES_SAMPLER`
-- `OTEL_TRACES_SAMPLER_ARG`
+**Internal — storage (`otel.spans.storage`):**
 
-If both project-specific and standard service-name variables are set, the project-specific variable wins for this server's Hono middleware configuration. Standard OpenTelemetry SDK configuration can still use `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`.
+| Span name | Attributes |
+|---|---|
+| `openfga.storage.read_tuples` | `openfga.store_id`, `openfga.page_size`, `openfga.result_count` |
+| `openfga.storage.apply_tuple_mutations` | `openfga.store_id`, `openfga.write_count`, `openfga.delete_count` |
+| `openfga.storage.list_changes` | `openfga.store_id`, `openfga.page_size`, `openfga.result_count` |
+| `openfga.storage.load_model_index` | `openfga.store_id`, `openfga.model_id` |
+| `openfga.storage.list_users_for_relation` | `openfga.store_id` (no relation or object IDs by default) |
 
-## Propagators
+**Internal — middleware (`otel.spans.auth`, `otel.spans.idempotency`):**
 
-The default propagators should include:
+| Span name | Attributes |
+|---|---|
+| `openfga.auth.dispatch` | `openfga.auth_mode` (`none`/`preshared`/`oidc`), `openfga.auth_outcome` (`allow`/`reject:<reason>`) |
+| `openfga.idempotency.claim` | `openfga.idempotency_mode`, `openfga.scope_path` |
+| `openfga.idempotency.complete` | `openfga.scope_path` |
+| `openfga.idempotency.replay` | `openfga.scope_path`, `openfga.replay_status` |
 
-- `tracecontext`
-- `baggage`
+## Validation Strategy
 
-If `OTEL_PROPAGATORS` is set, the implementation should honor it where the OpenTelemetry JavaScript SDK supports that configuration. Unsupported propagator names should fail startup with a clear configuration error rather than silently degrading trace continuity.
-
-## Exporter and SDK Startup
-
-When `OPENFGA_OTEL_ENABLED=false`, the server should not initialize the OpenTelemetry SDK or install the Hono OpenTelemetry middleware.
-
-When `OPENFGA_OTEL_ENABLED=true`, the server should initialize tracing before building or serving the Hono app. Startup should validate required exporter configuration when traces are expected to leave the process.
-
-Local development may support a console or no-op exporter if explicitly configured. Production should use OTLP-compatible configuration.
-
-## Security and Privacy
-
-Captured headers become telemetry data and may leave the deployment boundary. The default header capture list must remain narrow.
-
-Do not capture by default:
-
-- `authorization`
-- `cookie`
-- `set-cookie`
-- `proxy-authorization`
-- `x-api-key`
-- `idempotency-key`
-
-If operators override capture lists to include sensitive headers, that is an explicit deployment choice. Documentation must warn about the risk.
-
-## Observability Signals
-
-The initial feature focuses on tracing. Metrics may be emitted by the middleware when available, but metric dashboards and alerting are out of scope for the initial implementation.
-
-Spans should include route, method, URL, status code, service name, and service version when supported by the middleware. The implementation should keep request logging as the low-cardinality operational log and tracing as distributed request context.
+- `config.otel.enabled = false` (default) means the SDK is never imported. `src/observability/otel.ts` exports a `traced()` helper whose body is a synchronous pass-through when disabled — no span allocation, no attribute building.
+- When enabled, the SDK is initialized in `src/server.ts` before listeners bind, similar to the OIDC discovery pre-fetch pattern. SDK init failures (bad exporter URL, invalid sampler type) are fatal at boot.
+- The `traced()` helper takes the boundary category as its first argument and checks `config.otel.spans.{category}` to decide whether to emit. Disabling a category is zero-cost at the call site — the helper short-circuits to the wrapped function without span construction.
+- Sensitive-header capture rejection happens at Zod parse: a `capture.requestHeaders` or `capture.responseHeaders` entry matching one of the rejection-list values causes a config-load error. Rejection list: `authorization`, `cookie`, `set-cookie`, `proxy-authorization`, `x-api-key`, `idempotency-key`.
 
 ## Middleware Ordering
 
-Recommended order:
+Recommended order in `src/routes/index.ts` (when `otel.enabled = true` and `otel.spans.http = true`):
 
-1. OpenTelemetry middleware.
-2. Request logging.
-3. Authentication.
-4. Idempotency.
-5. OpenFGA route handlers.
+1. `otelMiddleware()` — wraps everything below in the request span.
+2. `requestLog` — structured log per request.
+3. `authMiddleware` — `/stores/*` scope.
+4. `requireStore` — `/stores/:storeId/*` scope.
+5. `idempotencyMiddleware` — configured scopes.
+6. Route handlers.
 
-This order lets the root request span include authentication and idempotency decisions while still preserving existing request logs.
+This places the OTel server span as the parent of every subsequent decision so an auth rejection or idempotency replay still produces a parent span carrying the route + status code.
+
+## Test Strategy
+
+- Unit tests for `src/observability/otel.ts`:
+  - `traced()` is a pass-through when `otel.enabled = false` — no SDK imports trigger.
+  - `traced()` emits a span with the expected name + attributes when enabled.
+  - Per-category gating: setting `otel.spans.evaluator = false` makes evaluator `traced()` calls pass-through even when `otel.enabled = true`.
+- Unit tests for `src/config-schema.ts` OTel additions:
+  - Capture list with a sensitive header rejected at parse.
+  - Unknown exporter type / sampler type rejected at parse.
+  - Default state parses with `otel.enabled = false`.
+- Integration test for HTTP boundary:
+  - With OTel enabled and a `console` exporter, a request to `/stores` produces a recorded span with the route attribute.
+  - Incoming `traceparent` is observed (verified by inspecting the recorded span's trace id).
+- Unit tests for span emission at evaluator + storage boundaries (using an in-memory `InMemorySpanExporter`).
+
+## Dependency Changes
+
+- Add (when OTel is enabled): `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-http`, `@opentelemetry/exporter-trace-otlp-grpc`, `@opentelemetry/resources`, `@opentelemetry/semantic-conventions`, `@hono/otel`.
+- These are static `dependencies` in `package.json` but only `import()`-ed dynamically from `src/observability/otel.ts` when `config.otel.enabled === true`. The disabled path doesn't load them.
 
 ## Acceptance Criteria
 
-- The PRD includes OpenTelemetry observability in current scope.
-- `docs/features/opentelemetry.md` defines propagation, header capture, configuration, security, and acceptance behavior.
-- `OPENFGA_OTEL_ENABLED=false` preserves current runtime behavior.
-- `OPENFGA_OTEL_ENABLED=true` installs Hono OpenTelemetry HTTP instrumentation.
-- Incoming `traceparent` and `tracestate` link server spans to upstream traces.
-- Incoming `baggage` is propagated according to OpenTelemetry SDK behavior.
-- Default captured request headers include `traceparent`, `tracestate`, and `baggage`.
-- Captured request and response headers are configurable by environment variable.
-- Sensitive headers are not captured by default.
-- Tests verify middleware installation behavior, default header capture configuration, and environment override parsing.
-- Documentation describes the required environment variables and warns about sensitive header capture.
+- `config.otel.enabled = false` preserves current runtime behavior (no SDK init, no spans emitted, no perf regression).
+- `config.otel.enabled = true` initializes the SDK before binding listeners; SDK init failure is FATAL.
+- HTTP boundary: `@hono/otel` is installed when `otel.enabled && otel.spans.http`. Incoming `traceparent` / `tracestate` continue upstream traces.
+- Every span name in the Span Catalog is emitted when its category is enabled.
+- Every category gate (`otel.spans.{http,evaluator,storage,auth,idempotency}`) independently suppresses its category's spans.
+- Sensitive headers cannot be added to the capture list — Zod rejects at config-load.
+- Every config field documented in §Configuration Surface is reachable via `OPENFGA_OTEL_*` env-var overrides per §Env-Var Override Mapping.
+- Unit tests cover the schema, the `traced()` helper's enabled/disabled paths, and per-category gating.
+- Integration test verifies the HTTP boundary emits the expected span via an in-process exporter and that incoming `traceparent` is honored.
+- `openfga.config.example.yaml`, `.env.example`, and `README.md` are updated.
 
 ## Open Questions
 
-- Should the first implementation include a console exporter for local development, or should it rely only on OTLP configuration?
-- Should `/health` be traced by default, or should it be excluded to reduce noise?
-- Should route-level spans be enough initially, or should later work add evaluator/storage spans for slow authorization decisions?
+- **Console exporter for dev**: shipped under `exporter.type: console`. Done.
+- **`/health` exclusion**: spans on `/health` are noisy. Decision: `@hono/otel` instruments all routes; operators can exclude via `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` filtering or sampling. Revisit if this becomes a real-world ops pain point.
+- **Tuple-data attribute capture**: not captured by default for privacy. Future operator-opt-in flag (`otel.capture.tupleAttributes = true`) could be added if a customer needs it. Out of scope here.
+- **`@opentelemetry/sdk-node` 0.x versioning**: the JS SDK has not yet shipped a 1.0 for `sdk-node`; the API package IS 1.x stable. The 0.x stream is the project's published stable. Pin to a current minor and bump deliberately.

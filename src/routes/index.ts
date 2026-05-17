@@ -34,6 +34,8 @@
  *   4. idempotency  Idempotency-Key for configured mutating endpoints
  */
 import { Hono } from 'hono'
+import { httpInstrumentationMiddleware as honoOtel } from '@hono/otel'
+import { config } from '../config'
 import { authMiddleware, getAuthConfig } from '../middleware/auth'
 import { idempotencyMiddleware } from '../middleware/idempotency'
 import { requestLog } from '../middleware/request-log'
@@ -47,6 +49,16 @@ import { tuplesRoutes } from './tuples'
 
 export function buildApp(): Hono {
   const app = new Hono()
+
+  // OpenTelemetry HTTP instrumentation — must wrap every later
+  // middleware so the request span is the parent of auth /
+  // idempotency / handler activity. Installed only when
+  // config.otel.enabled AND config.otel.spans.http; the SDK itself
+  // is initialized in src/server.ts before listeners bind, so by
+  // the time this app is built the tracer provider is ready.
+  if (config.otel.enabled && config.otel.spans.http) {
+    app.use('*', honoOtel())
+  }
 
   app.use('*', requestLog)
 

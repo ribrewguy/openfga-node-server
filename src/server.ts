@@ -31,6 +31,19 @@ import { applyMigrationsOnStartIfEnabled } from './storage/migrate-on-start'
 import { describeDb, requireDbUrl } from './storage/db'
 import { checkReadiness } from './storage/readiness'
 import { prefetchOidcJwks } from './middleware/oidc'
+import { initOtelSdk } from './observability/otel'
+
+// Initialize OpenTelemetry SDK BEFORE any other module that might
+// participate in tracing. No-op when config.otel.enabled is false —
+// the SDK is never imported in that path. Failure (bad exporter
+// URL, unsupported propagator) is fatal at boot.
+try {
+  await initOtelSdk()
+}
+catch (err) {
+  logger.fatal({ err, reason: 'otel_setup_failed' }, 'otel_setup_failed; refusing to start')
+  process.exit(1)
+}
 
 try {
   requireDbUrl(config.db.url)

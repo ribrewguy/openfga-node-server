@@ -153,6 +153,37 @@ export function applyEnvOverrides(raw: unknown, env: EnvLike = process.env): unk
   set(['loadModel', 'storeName'], 'OPENFGA_STORE_NAME')
   set(['loadModel', 'storeId'], 'OPENFGA_STORE_ID')
 
+  // ─── otel ───────────────────────────────────────────────────────
+  set(['otel', 'enabled'], 'OPENFGA_OTEL_ENABLED')
+  set(['otel', 'service', 'name'], 'OPENFGA_OTEL_SERVICE_NAME')
+  set(['otel', 'service', 'version'], 'OPENFGA_OTEL_SERVICE_VERSION')
+  set(['otel', 'exporter', 'type'], 'OPENFGA_OTEL_EXPORTER_TYPE')
+  set(['otel', 'exporter', 'endpoint'], 'OPENFGA_OTEL_EXPORTER_ENDPOINT')
+  set(['otel', 'exporter', 'timeoutMs'], 'OPENFGA_OTEL_EXPORTER_TIMEOUT_MS')
+  set(['otel', 'sampler', 'type'], 'OPENFGA_OTEL_SAMPLER_TYPE')
+  set(['otel', 'sampler', 'ratio'], 'OPENFGA_OTEL_SAMPLER_RATIO')
+  set(['otel', 'spans', 'http'], 'OPENFGA_OTEL_SPANS_HTTP')
+  set(['otel', 'spans', 'evaluator'], 'OPENFGA_OTEL_SPANS_EVALUATOR')
+  set(['otel', 'spans', 'storage'], 'OPENFGA_OTEL_SPANS_STORAGE')
+  set(['otel', 'spans', 'auth'], 'OPENFGA_OTEL_SPANS_AUTH')
+  set(['otel', 'spans', 'idempotency'], 'OPENFGA_OTEL_SPANS_IDEMPOTENCY')
+
+  // Comma-separated list fields.
+  for (const [envKey, configPath] of [
+    ['OPENFGA_OTEL_PROPAGATORS', ['otel', 'propagators']],
+    ['OPENFGA_OTEL_CAPTURE_REQUEST_HEADERS', ['otel', 'capture', 'requestHeaders']],
+    ['OPENFGA_OTEL_CAPTURE_RESPONSE_HEADERS', ['otel', 'capture', 'responseHeaders']],
+  ] as const) {
+    const raw = readNonEmpty(env, envKey)
+    if (raw !== undefined) {
+      const parts = raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0)
+      setPath(base, configPath as readonly string[], parts)
+    }
+  }
+
   // ─── top-level ──────────────────────────────────────────────────
   set(['migrateOnStart'], 'OPENFGA_MIGRATE_ON_START')
 

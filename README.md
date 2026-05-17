@@ -133,6 +133,30 @@ are always auth-exempt.
   the validation pipeline (iss / aud / exp / nbf / alg / optional
   sub and client_id allowlists) and the full error-reason log table.
 
+## Observability
+
+OpenTelemetry tracing is **off by default**. Setting
+`config.otel.enabled = true` (or `OPENFGA_OTEL_ENABLED=true`)
+initializes the SDK at boot — before listeners bind — and emits
+spans at every instrumented boundary.
+
+Boundaries are independently gated via `config.otel.spans.*`:
+
+- `http` — the Hono request lifecycle (`@hono/otel`). Continues
+  upstream W3C `traceparent` / `baggage` context.
+- `evaluator` — `check`, `expand`, `list-objects`, `list-users`,
+  `batch-check`.
+- `storage` — `read_tuples`, `apply_tuple_mutations`, `list_changes`,
+  `load_model_index`.
+- `auth` and `idempotency` — middleware decision spans (planned;
+  see the spec's follow-up section).
+
+Exporter, sampler, propagators, header capture, and resource
+attributes are configurable. Sensitive headers (`authorization`,
+`cookie`, etc.) cannot be added to the capture lists — Zod rejects
+them at config-load. See [`docs/features/opentelemetry.md`](docs/features/opentelemetry.md)
+for the full span catalog, configuration surface, and security model.
+
 ## Evaluation algebra
 
 The check evaluator implements the full OpenFGA rewrite-rule set:

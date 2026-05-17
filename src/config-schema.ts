@@ -116,6 +116,34 @@ export type OidcAlgorithm = (typeof OidcAlgorithms)[number]
 export const IdempotencyModes = ['off', 'optional', 'required'] as const
 export type IdempotencyMode = (typeof IdempotencyModes)[number]
 
+export const OtelExporterTypes = ['otlp-http', 'otlp-grpc', 'console', 'none'] as const
+export type OtelExporterType = (typeof OtelExporterTypes)[number]
+
+export const OtelSamplerTypes = [
+  'always_on',
+  'always_off',
+  'parentbased_always_on',
+  'traceidratio',
+  'parentbased_traceidratio',
+] as const
+export type OtelSamplerType = (typeof OtelSamplerTypes)[number]
+
+export const OtelPropagators = ['tracecontext', 'baggage', 'b3', 'b3multi', 'jaeger', 'ottrace'] as const
+export type OtelPropagator = (typeof OtelPropagators)[number]
+
+// Header names that must NEVER appear in otel.capture.* — recording
+// them as span attributes would leak credentials, idempotency
+// fingerprints, or session state to whatever backend the traces
+// stream to. Case-insensitive match at config-load time.
+const OTEL_FORBIDDEN_HEADERS = [
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization',
+  'x-api-key',
+  'idempotency-key',
+] as const
+
 const PoolSchema = z
   .object({
     max: nonNegativeInt('db.pool.max', 10),
@@ -222,6 +250,65 @@ const LoadModelSchema = z
   })
   .prefault({} as never)
 
+const OtelSpansSchema = z
+  .object({
+    http: strictBool('otel.spans.http').default(true),
+    evaluator: strictBool('otel.spans.evaluator').default(true),
+    storage: strictBool('otel.spans.storage').default(true),
+    auth: strictBool('otel.spans.auth').default(true),
+    idempotency: strictBool('otel.spans.idempotency').default(true),
+  })
+  .prefault({} as never)
+
+const OtelExporterSchema = z
+  .object({
+    type: z.enum(OtelExporterTypes).default('otlp-http'),
+    endpoint: z.string().default(''),
+    headers: z.record(z.string(), z.string()).default({}),
+    timeoutMs: nonNegativeInt('otel.exporter.timeoutMs', 10_000),
+  })
+  .prefault({} as never)
+
+const OtelSamplerSchema = z
+  .object({
+    type: z.enum(OtelSamplerTypes).default('always_on'),
+    ratio: z.coerce.number().min(0).max(1).default(1),
+  })
+  .prefault({} as never)
+
+const OtelCaptureSchema = z
+  .object({
+    requestHeaders: z
+      .array(z.string().min(1))
+      .default(['traceparent', 'tracestate', 'baggage']),
+    responseHeaders: z.array(z.string().min(1)).default([]),
+  })
+  .prefault({} as never)
+
+const OtelSchema = z
+  .object({
+    enabled: strictBool('otel.enabled').default(false),
+    service: z
+      .object({
+        name: z.string().min(1).default('openfga-node-server'),
+        version: z.string().default(''),
+      })
+      .prefault({} as never),
+    resource: z
+      .object({
+        attributes: z.record(z.string(), z.string()).default({}),
+      })
+      .prefault({} as never),
+    exporter: OtelExporterSchema,
+    propagators: z
+      .array(z.enum(OtelPropagators))
+      .default(['tracecontext', 'baggage']),
+    sampler: OtelSamplerSchema,
+    capture: OtelCaptureSchema,
+    spans: OtelSpansSchema,
+  })
+  .prefault({} as never)
+
 export const ConfigSchema = z
   .object({
     db: DbSchema,
@@ -231,6 +318,7 @@ export const ConfigSchema = z
     auth: AuthSchema,
     idempotency: IdempotencySchema,
     loadModel: LoadModelSchema,
+    otel: OtelSchema,
     migrateOnStart: strictBool('migrateOnStart').default(false),
   })
   .superRefine((cfg, ctx) => {
@@ -277,6 +365,24 @@ export const ConfigSchema = z
           'auth.mode=preshared requires auth.presharedKeys to be set with at least one non-empty key',
       })
     }
+
+    // OTel header-capture safety: forbid sensitive header names in
+    // either the request- or response-capture lists. Tracing backends
+    // are not always trustworthy boundaries for credentials or
+    // idempotency fingerprints.
+    const checkHeaders = (list: string[], path: string[]): void => {
+      for (const header of list) {
+        if ((OTEL_FORBIDDEN_HEADERS as readonly string[]).includes(header.toLowerCase())) {
+          ctx.addIssue({
+            code: 'custom',
+            path,
+            message: `${path.join('.')} contains forbidden sensitive header "${header}"; OTel span attributes must not capture credentials or idempotency keys`,
+          })
+        }
+      }
+    }
+    checkHeaders(cfg.otel.capture.requestHeaders, ['otel', 'capture', 'requestHeaders'])
+    checkHeaders(cfg.otel.capture.responseHeaders, ['otel', 'capture', 'responseHeaders'])
 
     if (cfg.auth.mode === 'oidc') {
       if (!cfg.auth.oidc.issuer) {

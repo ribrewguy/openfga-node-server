@@ -130,6 +130,52 @@ loadModel:
 migrateOnStart: false
 
 # ──────────────────────────────────────────────────────────────────
+# OpenTelemetry
+#
+# Off by default. When enabled, the SDK is initialized at boot
+# (before listeners bind) and spans are emitted at every internal +
+# external API boundary per the per-category gates below.
+# Full reference: docs/features/opentelemetry.md
+# ──────────────────────────────────────────────────────────────────
+otel:
+  enabled: false
+
+  service:
+    name: openfga-node-server
+    version: ''                          # defaults to package.json version
+
+  resource:
+    attributes: {}                       # e.g. { deployment.environment: prod }
+
+  exporter:
+    # otlp-http (default) | otlp-grpc | console | none
+    type: otlp-http
+    endpoint: ''                         # OTEL_EXPORTER_OTLP_ENDPOINT also honored
+    headers: {}                          # static OTLP headers (HTTP only)
+    timeoutMs: 10000
+
+  propagators: [tracecontext, baggage]
+
+  sampler:
+    # always_on | always_off | parentbased_always_on |
+    # traceidratio | parentbased_traceidratio
+    type: always_on
+    ratio: 1.0                           # used by ratio samplers
+
+  capture:
+    # Sensitive headers (authorization, cookie, x-api-key, etc.)
+    # are rejected at config-load.
+    requestHeaders: [traceparent, tracestate, baggage]
+    responseHeaders: []
+
+  spans:
+    http: true                           # external boundary
+    evaluator: true                      # check / expand / list-* / batch-check
+    storage: true                        # read / write / changes / load-model
+    auth: true                           # auth dispatch outcome
+    idempotency: true                    # claim / complete / replay
+
+# ──────────────────────────────────────────────────────────────────
 # Per-environment overrides
 #
 # c12 selects the block matching `NODE_ENV` at startup and merges it

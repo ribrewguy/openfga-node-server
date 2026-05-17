@@ -21,6 +21,7 @@ import type { TupleKey, TupleKeyWithoutCondition } from '@openfga/sdk'
 import { getDb, getDialect } from './db'
 import { dialectBigintParam, dialectTimestampParam } from './dialect'
 import { generateId } from './ids'
+import { traced } from '../observability/otel'
 
 export interface TupleRow {
   store_id: string
@@ -105,6 +106,22 @@ export class MissingTupleError extends Error {
 }
 
 export async function applyTupleMutations(
+  storeId: string,
+  mutations: TupleMutations,
+): Promise<void> {
+  return traced(
+    'storage',
+    'openfga.storage.apply_tuple_mutations',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.write_count': mutations.writes.length,
+      'openfga.delete_count': mutations.deletes.length,
+    }),
+    async () => applyTupleMutationsImpl(storeId, mutations),
+  )
+}
+
+async function applyTupleMutationsImpl(
   storeId: string,
   mutations: TupleMutations,
 ): Promise<void> {
@@ -234,6 +251,26 @@ export async function readTuplesPage(
   filter: ReadFilter,
   cursor: ReadTupleCursor | null,
 ): Promise<ReadTuplesPage> {
+  return traced(
+    'storage',
+    'openfga.storage.read_tuples',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.page_size': filter.pageSize ?? 0,
+    }),
+    async (span) => {
+      const result = await readTuplesPageImpl(storeId, filter, cursor)
+      span.setAttribute('openfga.result_count', result.rows.length)
+      return result
+    },
+  )
+}
+
+async function readTuplesPageImpl(
+  storeId: string,
+  filter: ReadFilter,
+  cursor: ReadTupleCursor | null,
+): Promise<ReadTuplesPage> {
   let query = getDb()
     .selectFrom('tuple')
     .select(TUPLE_COLUMNS)
@@ -345,6 +382,24 @@ export interface ListChangesPage {
  * newest-first implementation.
  */
 export async function listChangesPage(
+  storeId: string,
+  pageSize: number,
+  cursor: { inserted_at: string, seq: string } | null,
+  opts: { objectType?: string, startTime?: string } = {},
+): Promise<ListChangesPage> {
+  return traced(
+    'storage',
+    'openfga.storage.list_changes',
+    () => ({ 'openfga.store_id': storeId, 'openfga.page_size': pageSize }),
+    async (span) => {
+      const result = await listChangesPageImpl(storeId, pageSize, cursor, opts)
+      span.setAttribute('openfga.result_count', result.rows.length)
+      return result
+    },
+  )
+}
+
+async function listChangesPageImpl(
   storeId: string,
   pageSize: number,
   cursor: { inserted_at: string, seq: string } | null,
