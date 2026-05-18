@@ -9,14 +9,14 @@ importers:
   .:
     dependencies:
       '@hono/node-server':
-        specifier: ^2.0.0
-        version: 2.0.0(hono@4.12.16)
+        specifier: ^2.0.2
+        version: 2.0.2(hono@4.12.19)
       '@hono/otel':
         specifier: ^1.1.2
-        version: 1.1.2(hono@4.12.16)
+        version: 1.1.2(hono@4.12.19)
       '@hono/zod-validator':
-        specifier: ^0.7.6
-        version: 0.7.6(hono@4.12.16)(zod@4.4.2)
+        specifier: ^0.8.0
+        version: 0.8.0(hono@4.12.19)(zod@4.4.3)
       '@openfga/syntax-transformer':
         specifier: ^0.2.1
         version: 0.2.1
@@ -51,14 +51,14 @@ importers:
         specifier: ^3.3.4
         version: 3.3.4(magicast@0.5.2)
       hono:
-        specifier: ^4.6.14
-        version: 4.12.16
+        specifier: ^4.12.18
+        version: 4.12.19
       jose:
         specifier: ^6.2.3
         version: 6.2.3
       kysely:
-        specifier: ^0.28.17
-        version: 0.28.17
+        specifier: ^0.29.0
+        version: 0.29.2
       pg:
         specifier: ^8.20.0
         version: 8.20.0
@@ -66,8 +66,8 @@ importers:
         specifier: ^10.3.1
         version: 10.3.1
       zod:
-        specifier: ^4.4.2
-        version: 4.4.2
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.1
@@ -606,8 +606,8 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
-  '@hono/node-server@2.0.0':
-    resolution: {integrity: sha512-n3GfHwwCvHCkGmOwKfxUPOlbfzuO64Sbc5XC4NGPIXxkuOnJrdgExdRKmHfF924r914WRJPT397GdqLvdYTeyQ==}
+  '@hono/node-server@2.0.2':
+    resolution: {integrity: sha512-tXlTi1h/4V7sDe7i97IVP+9re9ZU7wXZZggnR5ucCRclf1+AX6YhGStrR5w8bLj+3Mlyl0pKfBh9gqTqqnGKfQ==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4
@@ -617,10 +617,10 @@ packages:
     peerDependencies:
       hono: '>=4.0.0'
 
-  '@hono/zod-validator@0.7.6':
-    resolution: {integrity: sha512-Io1B6d011Gj1KknV4rXYz4le5+5EubcWEU/speUjuw9XMMIaP3n78yXLhjd2A3PXaXaUwEAluOiAyLqhBEJgsw==}
+  '@hono/zod-validator@0.8.0':
+    resolution: {integrity: sha512-5uS4S1/LKtZQYvD4BtpPUFkOv8d1wNxHHrChm26buMiEYc1FrHWvDUaKVBwkiVtvSExHSpLGDvcnpI2Copyj9w==}
     peerDependencies:
-      hono: '>=3.9.0'
+      hono: '>=4.10.0'
       zod: ^3.25.0 || ^4.0.0
 
   '@humanfs/core@0.19.2':
@@ -1846,8 +1846,8 @@ packages:
   help-me@5.0.0:
     resolution: {integrity: sha512-7xgomUX6ADmcYzFik0HzAxh/73YlKR9bmFzf51CZwR+b6YtzU2m0u49hQCqV6SvlqIqsaxovfwdvbnsw3b/zpg==}
 
-  hono@4.12.16:
-    resolution: {integrity: sha512-jN0ZewiNAWSe5khM3EyCmBb250+b40wWbwNILNfEvq84VREWwOIkuUsFONk/3i3nqkz7Oe1PcpM2mwQEK2L9Kg==}
+  hono@4.12.19:
+    resolution: {integrity: sha512-xa3eYXYXx68XTT4hZ7dRzsXBhaq85ToSrlUJNoR0gwz/1Ap/CNwX47wfvV7pc/xWhjKVVkLT7zBJy8chhNguqQ==}
     engines: {node: '>=16.9.0'}
 
   hookable@5.5.3:
@@ -1959,9 +1959,9 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  kysely@0.28.17:
-    resolution: {integrity: sha512-nbD8lB9EB3wNdMhOCdx5Li8DxnLbvKByylRLcJ1h+4SkrowVeECAyZlyiKMThF7xFdRz0jSQ2MoJr+wXux2y0Q==}
-    engines: {node: '>=20.0.0'}
+  kysely@0.29.2:
+    resolution: {integrity: sha512-s6WVJyEZrbm6jhBpiKHsGHyePMrVQKJ85wZCFCr9W4QHv6WTjWIrdvTmO9hDEA3bNK0xkrE2DqrHsXMLWuZpQg==}
+    engines: {node: '>=22.0.0'}
 
   levn@0.4.1:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
@@ -2785,8 +2785,8 @@ packages:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
 
-  zod@4.4.2:
-    resolution: {integrity: sha512-IynmDyxsEsb9RKzO3J9+4SxXnl2FTFSzNBaKKaMV6tsSk0rw9gYw9gs+JFCq/qk2LCZ78KDwyj+Z289TijSkUw==}
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -3175,20 +3175,20 @@ snapshots:
       protobufjs: 7.5.8
       yargs: 17.7.2
 
-  '@hono/node-server@2.0.0(hono@4.12.16)':
+  '@hono/node-server@2.0.2(hono@4.12.19)':
     dependencies:
-      hono: 4.12.16
+      hono: 4.12.19
 
-  '@hono/otel@1.1.2(hono@4.12.16)':
+  '@hono/otel@1.1.2(hono@4.12.19)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/semantic-conventions': 1.41.1
-      hono: 4.12.16
+      hono: 4.12.19
 
-  '@hono/zod-validator@0.7.6(hono@4.12.16)(zod@4.4.2)':
+  '@hono/zod-validator@0.8.0(hono@4.12.19)(zod@4.4.3)':
     dependencies:
-      hono: 4.12.16
-      zod: 4.4.2
+      hono: 4.12.19
+      zod: 4.4.3
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -4504,7 +4504,7 @@ snapshots:
 
   help-me@5.0.0: {}
 
-  hono@4.12.16: {}
+  hono@4.12.19: {}
 
   hookable@5.5.3: {}
 
@@ -4584,7 +4584,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  kysely@0.28.17: {}
+  kysely@0.29.2: {}
 
   levn@0.4.1:
     dependencies:
@@ -5423,6 +5423,6 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod@4.4.2: {}
+  zod@4.4.3: {}
 
   zwitch@2.0.4: {}
