@@ -87,10 +87,18 @@ async function claimWithDb(
   // and the DB can leave rows strictly after the JS cutoff, making
   // the DELETE silently miss them and the SELECT then return them
   // with a stale fingerprint. See openfga-how.
+  //
+  // The cutoff comparison is `<=` (not `<`) so that on a dialect
+  // where the clock and the row's `created_at` resolve to the same
+  // instant (SQLite's 'now' is millisecond-floor, openfga-sp5), a
+  // ttlMs=0 sweep still treats existing rows as expired. The lookup
+  // mirror below uses the inclusive boundary's complement (`>`) to
+  // stay consistent. Postgres microsecond now() effectively never
+  // hit the equality boundary, so this is a no-op there in practice.
   await db
     .deleteFrom('idempotency_keys')
     .where('key', '=', key)
-    .where(sql<boolean>`created_at < ${dialectNowMinus(dialect, ttlMs)}`)
+    .where(sql<boolean>`created_at <= ${dialectNowMinus(dialect, ttlMs)}`)
     .execute()
 
   const insertResult = await db
@@ -106,7 +114,7 @@ async function claimWithDb(
     .selectFrom('idempotency_keys')
     .select(['request_hash', 'status', 'response_status', 'response_body'])
     .where('key', '=', key)
-    .where(sql<boolean>`created_at >= ${dialectNowMinus(dialect, ttlMs)}`)
+    .where(sql<boolean>`created_at > ${dialectNowMinus(dialect, ttlMs)}`)
     .executeTakeFirst()
 
   // The row was deleted between our DELETE and INSERT (rare TTL race).

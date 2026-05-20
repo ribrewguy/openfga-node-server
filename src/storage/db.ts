@@ -26,21 +26,27 @@
  * `src/storage/pg-internals.ts` as the single source of truth.
  */
 import { Kysely, ParseJSONResultsPlugin, PostgresDialect, SqliteDialect } from 'kysely'
-import { Pool } from 'pg'
+import { Pool, types as pgTypes } from 'pg'
 import type { PoolConfig } from 'pg'
 import Sqlite from 'better-sqlite3'
 import { logger } from '../logger'
+import { config } from '../config'
 import type { Database } from './db-schema'
 import { dialectFromUrl, sqlitePathFromUrl, type DialectName } from './dialect'
 import { TablePrefixPlugin } from './table-prefix-plugin'
-// Side effect: registers pg type-parser overrides for OIDs 1184/1114
-// so timestamptz/timestamp return as text (preserves microsecond
-// precision — see openfga-5uv). The helper `intFromEnv` is shared
-// with pool.ts.
-import { intFromEnv } from './pg-internals'
+
+// Preserve openfga-5uv: return timestamptz/timestamp as raw text from
+// Postgres rather than the default JS Date conversion. Date truncates
+// to milliseconds, and that breaks cursor pagination on tables where
+// multiple rows share a wall-clock millisecond. The setTypeParser
+// calls are idempotent at the pg layer; later calls overwrite the
+// same global parser slot with the same function.
+const PG_OID_TIMESTAMPTZ = 1184
+const PG_OID_TIMESTAMP = 1114
+pgTypes.setTypeParser(PG_OID_TIMESTAMPTZ, value => value)
+pgTypes.setTypeParser(PG_OID_TIMESTAMP, value => value)
 
 const NAMESPACE_PATTERN = /^[a-z][a-z0-9_]{0,62}$/
-const DEFAULT_NAMESPACE = 'openfga'
 
 let _namespace: string | null = null
 let _db: Kysely<Database> | null = null
@@ -98,53 +104,67 @@ interface PgConnectionParameters {
  */
 export function getNamespace(): string {
   if (_namespace !== null) return _namespace
-  const raw = process.env['OPENFGA_DB_NAMESPACE'] ?? DEFAULT_NAMESPACE
+  // Schema-validated at config load; preserve the runtime check for
+  // robustness against unexpected mutations to the live `config`
+  // (e.g. tests that swap in a hand-rolled Config object).
+  const raw = config.db.namespace
   if (!NAMESPACE_PATTERN.test(raw)) {
     throw new Error(
-      `[openfga] OPENFGA_DB_NAMESPACE must match /^[a-z][a-z0-9_]{0,62}$/ (lowercase letter, then up to 62 chars of [a-z0-9_]); got "${raw}"`,
+      `[openfga] db.namespace must match /^[a-z][a-z0-9_]{0,62}$/ (lowercase letter, then up to 62 chars of [a-z0-9_]); got "${raw}"`,
     )
   }
   _namespace = raw
   return raw
 }
 
-/** Read the dialect inferred from `OPENFGA_DB_URL`. Cached. */
-export function getDialect(): DialectName {
-  if (_dialect !== null) return _dialect
-  const url = process.env['OPENFGA_DB_URL']
+/**
+ * Throw the canonical "OPENFGA_DB_URL is not set" error when the
+ * configured `db.url` is undefined. Schema-level optionality lets
+ * the load-model CLI run without a database URL set; storage modules
+ * (and the server bootstrap) gate on this helper at the moment a
+ * connection is required.
+ */
+export function requireDbUrl(url: string | undefined): string {
   if (!url) {
     throw new Error(
-      '[openfga] OPENFGA_DB_URL is not set. Configure it to point at the database backing the openfga state (see .env.example).',
+      '[openfga] OPENFGA_DB_URL is not set. Configure it (env var or '
+      + 'openfga.config.yaml `db.url`) to point at the database backing '
+      + 'the openfga state (see .env.example).',
     )
   }
+  return url
+}
+
+/** Read the dialect inferred from `config.db.url`. Cached. */
+export function getDialect(): DialectName {
+  if (_dialect !== null) return _dialect
+  const url = requireDbUrl(config.db.url)
   _dialect = dialectFromUrl(url)
   return _dialect
 }
 
 function buildPgPool(): Pool {
-  const connectionString = process.env['OPENFGA_DB_URL']!
-  const config: PoolConfig = {
+  const connectionString = requireDbUrl(config.db.url)
+  const pool = config.db.pool
+  const poolConfig: PoolConfig = {
     connectionString,
-    application_name: process.env['OPENFGA_DB_APPLICATION_NAME'] ?? 'openfga-node-server',
-    max: intFromEnv('OPENFGA_DB_POOL_MAX', 10),
-    min: intFromEnv('OPENFGA_DB_POOL_MIN', 0),
-    idleTimeoutMillis: intFromEnv('OPENFGA_DB_POOL_IDLE_TIMEOUT_MS', 30_000),
+    application_name: config.db.applicationName,
+    max: pool.max,
+    min: pool.min,
+    idleTimeoutMillis: pool.idleTimeoutMs,
   }
-  const connectionTimeout = intFromEnv('OPENFGA_DB_POOL_CONNECTION_TIMEOUT_MS', 0)
-  if (connectionTimeout > 0) config.connectionTimeoutMillis = connectionTimeout
-  const statementTimeout = intFromEnv('OPENFGA_DB_STATEMENT_TIMEOUT_MS', 0)
-  if (statementTimeout > 0) config.statement_timeout = statementTimeout
-  const queryTimeout = intFromEnv('OPENFGA_DB_QUERY_TIMEOUT_MS', 0)
-  if (queryTimeout > 0) config.query_timeout = queryTimeout
-  const pool = new Pool(config)
-  pool.on('error', (err) => {
+  if (pool.connectionTimeoutMs > 0) poolConfig.connectionTimeoutMillis = pool.connectionTimeoutMs
+  if (pool.statementTimeoutMs > 0) poolConfig.statement_timeout = pool.statementTimeoutMs
+  if (pool.queryTimeoutMs > 0) poolConfig.query_timeout = pool.queryTimeoutMs
+  const pgPool = new Pool(poolConfig)
+  pgPool.on('error', (err) => {
     logger.error({ err }, 'pg pool error (kysely)')
   })
   // Snapshot the resolved per-client values pg actually used to dial,
   // so describeDb() can report them without re-parsing OPENFGA_DB_URL.
   // `connectionParameters` is internal to pg but stable; see the
   // PgConnectionParameters comment above.
-  pool.on('connect', (client) => {
+  pgPool.on('connect', (client) => {
     const params = (client as unknown as { connectionParameters: PgConnectionParameters }).connectionParameters
     _pgResolved = {
       host: params.host ?? null,
@@ -155,11 +175,11 @@ function buildPgPool(): Pool {
       tlsEnabled: Boolean(params.ssl),
     }
   })
-  return pool
+  return pgPool
 }
 
 function buildSqlite(): Sqlite.Database {
-  const url = process.env['OPENFGA_DB_URL']!
+  const url = requireDbUrl(config.db.url)
   const path = sqlitePathFromUrl(url)
   const db = new Sqlite(path)
   // WAL mode is the right default for any non-:memory: path — better

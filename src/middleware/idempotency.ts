@@ -38,6 +38,7 @@
 import { createHash } from 'node:crypto'
 import type { MiddlewareHandler } from 'hono'
 import { logger } from '../logger'
+import { config } from '../config'
 import { claimKey, completeKey, releaseKey } from '../storage/idempotency'
 
 export type IdempotencyMode = 'off' | 'optional' | 'required'
@@ -61,8 +62,6 @@ export interface IdempotencyOptions {
   ttlMs?: number
 }
 
-const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
-
 const ERROR_ENVELOPES = {
   missing_key: { code: 'invalid_argument', message: 'Idempotency-Key header is required' },
   empty_key: { code: 'invalid_argument', message: 'Idempotency-Key header must not be empty' },
@@ -70,24 +69,6 @@ const ERROR_ENVELOPES = {
   mismatch: { code: 'idempotency_fingerprint_mismatch', message: 'Idempotency-Key was reused with a different request fingerprint' },
   unavailable: { code: 'idempotency_store_unavailable', message: 'idempotency store is unavailable; retry later' },
 } as const
-
-function readModeFromEnv(): IdempotencyMode {
-  const raw = (process.env['OPENFGA_IDEMPOTENCY_MODE'] ?? 'off').trim().toLowerCase()
-  if (raw === 'off' || raw === 'optional' || raw === 'required') return raw
-  throw new Error(
-    `[openfga] OPENFGA_IDEMPOTENCY_MODE must be one of: off, optional, required. Got "${raw}".`,
-  )
-}
-
-function readTtlFromEnv(): number {
-  const raw = process.env['OPENFGA_IDEMPOTENCY_TTL_MS']
-  if (raw === undefined || raw === '') return DEFAULT_TTL_MS
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`[openfga] OPENFGA_IDEMPOTENCY_TTL_MS must be a positive integer; got "${raw}".`)
-  }
-  return n
-}
 
 function pathMatches(routePattern: string, requestPath: string): boolean {
   if (routePattern === requestPath) return true
@@ -132,8 +113,8 @@ function keyHash(key: string): string {
  * are passed.
  */
 export function idempotencyMiddleware(options: IdempotencyOptions): MiddlewareHandler {
-  const mode = options.mode ?? readModeFromEnv()
-  const ttlMs = options.ttlMs ?? readTtlFromEnv()
+  const mode = options.mode ?? config.idempotency.mode
+  const ttlMs = options.ttlMs ?? config.idempotency.ttlMs
   const scopes = options.scopes
 
   return async (c, next) => {

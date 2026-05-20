@@ -21,6 +21,7 @@ import type { TupleKey, TupleKeyWithoutCondition } from '@openfga/sdk'
 import { getDb, getDialect } from './db'
 import { dialectBigintParam, dialectTimestampParam } from './dialect'
 import { generateId } from './ids'
+import { traced } from '../observability/otel'
 
 export interface TupleRow {
   store_id: string
@@ -105,6 +106,22 @@ export class MissingTupleError extends Error {
 }
 
 export async function applyTupleMutations(
+  storeId: string,
+  mutations: TupleMutations,
+): Promise<void> {
+  return traced(
+    'storage',
+    'openfga.storage.apply_tuple_mutations',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.write_count': mutations.writes.length,
+      'openfga.delete_count': mutations.deletes.length,
+    }),
+    async () => applyTupleMutationsImpl(storeId, mutations),
+  )
+}
+
+async function applyTupleMutationsImpl(
   storeId: string,
   mutations: TupleMutations,
 ): Promise<void> {
@@ -234,6 +251,26 @@ export async function readTuplesPage(
   filter: ReadFilter,
   cursor: ReadTupleCursor | null,
 ): Promise<ReadTuplesPage> {
+  return traced(
+    'storage',
+    'openfga.storage.read_tuples',
+    () => ({
+      'openfga.store_id': storeId,
+      'openfga.page_size': filter.pageSize ?? 0,
+    }),
+    async (span) => {
+      const result = await readTuplesPageImpl(storeId, filter, cursor)
+      span.setAttribute('openfga.result_count', result.rows.length)
+      return result
+    },
+  )
+}
+
+async function readTuplesPageImpl(
+  storeId: string,
+  filter: ReadFilter,
+  cursor: ReadTupleCursor | null,
+): Promise<ReadTuplesPage> {
   let query = getDb()
     .selectFrom('tuple')
     .select(TUPLE_COLUMNS)
@@ -350,6 +387,24 @@ export async function listChangesPage(
   cursor: { inserted_at: string, seq: string } | null,
   opts: { objectType?: string, startTime?: string } = {},
 ): Promise<ListChangesPage> {
+  return traced(
+    'storage',
+    'openfga.storage.list_changes',
+    () => ({ 'openfga.store_id': storeId, 'openfga.page_size': pageSize }),
+    async (span) => {
+      const result = await listChangesPageImpl(storeId, pageSize, cursor, opts)
+      span.setAttribute('openfga.result_count', result.rows.length)
+      return result
+    },
+  )
+}
+
+async function listChangesPageImpl(
+  storeId: string,
+  pageSize: number,
+  cursor: { inserted_at: string, seq: string } | null,
+  opts: { objectType?: string, startTime?: string } = {},
+): Promise<ListChangesPage> {
   const dialect = getDialect()
   let query = getDb()
     .selectFrom('tuple_change')
@@ -357,8 +412,13 @@ export async function listChangesPage(
       'id',
       // Cast seq to text so SQLite doesn't return it as a JS number.
       // Postgres bigserial already comes back as text via pg's default
-      // int8 parser; the cast is a no-op there.
-      sql<string>`cast(seq as text)`.as('seq'),
+      // int8 parser; the cast is a no-op there. Aliased as `seq_str`
+      // (not `seq`) so the alias does NOT shadow the underlying
+      // integer column in `ORDER BY seq` below — referencing the
+      // text alias would produce lexicographic ordering ("10" before
+      // "7"), which silently breaks pagination once the seq counter
+      // crosses a digit boundary on SQLite (openfga-sp5).
+      sql<string>`cast(seq as text)`.as('seq_str'),
       'object_type',
       'object_id',
       'relation',
@@ -381,11 +441,17 @@ export async function listChangesPage(
     query = query.where(sql<boolean>`(inserted_at, seq) > (${ts}, ${seq})`)
   }
 
-  const rows = await query
+  const rawRows = await query
     .orderBy('inserted_at', 'asc')
     .orderBy('seq', 'asc')
     .limit(pageSize + 1)
     .execute()
+
+  // Re-shape the alias to satisfy the public TupleChangeRow contract
+  // (`seq: string`). The query returns rows with `seq_str` as the
+  // text-cast cursor value; downstream callers expect the field to be
+  // named `seq`.
+  const rows: TupleChangeRow[] = rawRows.map(({ seq_str, ...rest }) => ({ ...rest, seq: seq_str }))
 
   if (rows.length <= pageSize) {
     return { rows, nextCursor: null }

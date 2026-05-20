@@ -20,6 +20,7 @@ import { sql } from 'kysely'
 import { getDb, resetDb } from '../../src/storage/db'
 import { checkReadiness } from '../../src/storage/readiness'
 import { migrateToLatest } from '../_helpers/sqlite-bootstrap'
+import { reloadConfigForTests } from '../../src/config'
 
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
@@ -28,6 +29,7 @@ beforeEach(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k]
   process.env['OPENFGA_DB_URL'] = ':memory:'
   delete process.env['OPENFGA_DB_NAMESPACE']
+  await reloadConfigForTests()
   await resetDb()
 })
 
@@ -37,6 +39,7 @@ afterEach(async () => {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
+  await reloadConfigForTests()
 })
 
 describe('checkReadiness (SQLite)', () => {
@@ -69,6 +72,7 @@ describe('checkReadiness (SQLite)', () => {
 
   it('honours a non-default OPENFGA_DB_NAMESPACE (looks for prefixed names)', async () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    await reloadConfigForTests()
     await resetDb()
     await migrateToLatest()
     const result = await checkReadiness()
@@ -81,6 +85,7 @@ describe('checkReadiness (SQLite)', () => {
     // first query, which is exactly the surface the probe needs to
     // tolerate (open-success-then-query-fail).
     process.env['OPENFGA_DB_URL'] = 'sqlite:/dev/null/openfga.db'
+    await reloadConfigForTests()
     await resetDb()
     const result = await checkReadiness()
     expect(result.ok).toBe(false)

@@ -21,6 +21,7 @@ import { dialectFromUrl, dialectNowMinus, sqlitePathFromUrl } from '../../src/st
 import type { Database } from '../../src/storage/db-schema'
 import { TablePrefixPlugin } from '../../src/storage/table-prefix-plugin'
 import { describeDb, getDb, getDialect, getNamespace, resetDb } from '../../src/storage/db'
+import { reloadConfigForTests } from '../../src/config'
 
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
@@ -35,6 +36,7 @@ afterEach(async () => {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
+  await reloadConfigForTests()
   await resetDb()
 })
 
@@ -79,47 +81,43 @@ describe('sqlitePathFromUrl', () => {
 })
 
 describe('getNamespace', () => {
-  it('returns the default when unset', () => {
+  it('returns the default when unset', async () => {
     delete process.env['OPENFGA_DB_NAMESPACE']
+    await reloadConfigForTests()
     expect(getNamespace()).toBe('openfga')
   })
 
   it.each(['app_authz', 'fga', 'a', 'a1', 'snake_case_123'])(
     'accepts valid identifier %s',
-    (ns) => {
+    async (ns) => {
       process.env['OPENFGA_DB_NAMESPACE'] = ns
+      await reloadConfigForTests()
       expect(getNamespace()).toBe(ns)
     },
   )
 
-  it.each([
-    '',
-    '1starts_with_digit',
-    'Has_Uppercase',
-    'has-dash',
-    'has.dot',
-    'has space',
-    'a'.repeat(64), // 64 chars exceeds NAMEDATALEN-1 boundary
-    '"quoted"',
-    'drop;table',
-  ])('rejects invalid identifier %s', (ns) => {
-    process.env['OPENFGA_DB_NAMESPACE'] = ns
-    expect(() => getNamespace()).toThrow(/OPENFGA_DB_NAMESPACE must match/)
-  })
+  // Invalid-namespace validation now happens at config-load time via
+  // the Zod schema; see tests/unit/config-schema.test.ts for the full
+  // coverage of the namespace regex. This file keeps one downstream
+  // assertion that getNamespace() returns the validated value when it
+  // is valid.
 
-  it('caches the validated value', () => {
+  it('caches the validated value', async () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    await reloadConfigForTests()
     expect(getNamespace()).toBe('app_authz')
     // Mutating after first read does not flip the cache (resetDb()
     // clears it; this test asserts the cache exists).
     process.env['OPENFGA_DB_NAMESPACE'] = 'something_else'
+    await reloadConfigForTests()
     expect(getNamespace()).toBe('app_authz')
   })
 })
 
 describe('getDialect', () => {
-  it('throws when OPENFGA_DB_URL is unset', () => {
+  it('throws when db.url is unset', async () => {
     delete process.env['OPENFGA_DB_URL']
+    await reloadConfigForTests()
     expect(() => getDialect()).toThrow(/OPENFGA_DB_URL is not set/)
   })
 
@@ -127,8 +125,9 @@ describe('getDialect', () => {
     ['postgres://u:p@h/d', 'postgres' as const],
     [':memory:', 'sqlite' as const],
     ['sqlite:./x.db', 'sqlite' as const],
-  ])('infers dialect %s from %s', (url, expected) => {
+  ])('infers dialect %s from %s', async (url, expected) => {
     process.env['OPENFGA_DB_URL'] = url
+    await reloadConfigForTests()
     expect(getDialect()).toBe(expected)
   })
 })
@@ -240,9 +239,10 @@ describe('dialectNowMinus', () => {
 })
 
 describe('getDb (SQLite end-to-end smoke)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env['OPENFGA_DB_URL'] = ':memory:'
     delete process.env['OPENFGA_DB_NAMESPACE']
+    await reloadConfigForTests()
   })
 
   it('returns a Kysely instance that can execute a raw SELECT', async () => {
@@ -253,6 +253,7 @@ describe('getDb (SQLite end-to-end smoke)', () => {
 
   it('honours the configured namespace via the prefix plugin', async () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    await reloadConfigForTests()
     const db = getDb()
     // Create the prefixed physical table by hand. The prefix plugin
     // rewrites the logical name on the way to SQL, so a select on
@@ -276,10 +277,12 @@ describe('getDb (SQLite end-to-end smoke)', () => {
 
   it('isolates singletons across resetDb()', async () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'first'
+    await reloadConfigForTests()
     const a = getDb()
     expect(a).toBe(getDb())
     await resetDb()
     process.env['OPENFGA_DB_NAMESPACE'] = 'second'
+    await reloadConfigForTests()
     const b = getDb()
     expect(b).not.toBe(a)
     expect(getNamespace()).toBe('second')
@@ -294,9 +297,10 @@ describe('describeDb (SQLite path)', () => {
   // tests cover the SQLite branch — better-sqlite3 resolves all
   // driver state at construction time, so describeDb() is fully
   // populated as soon as getDb() returns.
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env['OPENFGA_DB_URL'] = ':memory:'
     delete process.env['OPENFGA_DB_NAMESPACE']
+    await reloadConfigForTests()
   })
 
   it('reports dialect=sqlite with resolved driver state for :memory:', () => {
@@ -312,8 +316,9 @@ describe('describeDb (SQLite path)', () => {
     })
   })
 
-  it('reports the configured namespace as both namespace and tablePrefix', () => {
+  it('reports the configured namespace as both namespace and tablePrefix', async () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
+    await reloadConfigForTests()
     getDb()
     const desc = describeDb()
     if (desc.dialect !== 'sqlite') throw new Error('expected sqlite branch')
@@ -321,12 +326,13 @@ describe('describeDb (SQLite path)', () => {
     expect(desc.tablePrefix).toBe('app_authz_')
   })
 
-  it('reports the resolved file path from the better-sqlite3 instance, not the raw URL', () => {
+  it('reports the resolved file path from the better-sqlite3 instance, not the raw URL', async () => {
     // `sqlite:./openfga-test.db` and `file:./openfga-test.db` both
     // round-trip through sqlitePathFromUrl() to `./openfga-test.db`.
     // describeDb() reads from `db.name`, so the prefix is gone in the
     // output regardless of which input form was used.
     process.env['OPENFGA_DB_URL'] = 'file::memory:'
+    await reloadConfigForTests()
     getDb()
     const desc = describeDb()
     if (desc.dialect !== 'sqlite') throw new Error('expected sqlite branch')

@@ -35,9 +35,11 @@ Agents must respect:
 * `@docs/policies/branches-worktrees.md`
 * `@docs/policies/beads-protected-branches.md`
 * `@docs/policies/cass.md`
+* `@docs/policies/code-organization.md`
 * `@docs/policies/code-reviews.md`
 * `@docs/policies/closeout-summaries.md`
 * `@docs/policies/commits.md`
+* `@docs/policies/dependabot.md`
 * `@docs/policies/feature-governance.md`
 * `@docs/policies/mcp.md`
 * `@docs/policies/review-summaries.md`

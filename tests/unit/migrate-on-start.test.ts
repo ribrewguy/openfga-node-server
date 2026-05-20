@@ -24,6 +24,7 @@ import { resetDb } from '../../src/storage/db'
 import { logger } from '../../src/logger'
 import { applyMigrationsOnStartIfEnabled, parseMigrateOnStart } from '../../src/storage/migrate-on-start'
 import { checkReadiness } from '../../src/storage/readiness'
+import { reloadConfigForTests } from '../../src/config'
 
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE', 'OPENFGA_MIGRATE_ON_START'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
@@ -33,6 +34,7 @@ beforeEach(async () => {
   process.env['OPENFGA_DB_URL'] = ':memory:'
   delete process.env['OPENFGA_DB_NAMESPACE']
   delete process.env['OPENFGA_MIGRATE_ON_START']
+  await reloadConfigForTests()
   await resetDb()
 })
 
@@ -42,6 +44,7 @@ afterEach(async () => {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
+  await reloadConfigForTests()
 })
 
 describe('parseMigrateOnStart', () => {
@@ -81,6 +84,7 @@ describe('applyMigrationsOnStartIfEnabled', () => {
 
   it('is a no-op when the flag is false', async () => {
     process.env['OPENFGA_MIGRATE_ON_START'] = 'false'
+    await reloadConfigForTests()
     await applyMigrationsOnStartIfEnabled()
     const result = await checkReadiness()
     expect(result.ok).toBe(false)
@@ -89,6 +93,7 @@ describe('applyMigrationsOnStartIfEnabled', () => {
 
   it('applies migrations when the flag is true (probe flips ok)', async () => {
     process.env['OPENFGA_MIGRATE_ON_START'] = 'true'
+    await reloadConfigForTests()
     // Pre-condition: readiness reports schema_missing.
     expect(await checkReadiness()).toMatchObject({ ok: false, reason: 'schema_missing' })
     await applyMigrationsOnStartIfEnabled()
@@ -99,15 +104,20 @@ describe('applyMigrationsOnStartIfEnabled', () => {
   it('honours a non-default OPENFGA_DB_NAMESPACE', async () => {
     process.env['OPENFGA_DB_NAMESPACE'] = 'app_authz'
     process.env['OPENFGA_MIGRATE_ON_START'] = 'true'
+    await reloadConfigForTests()
     await resetDb()
     await applyMigrationsOnStartIfEnabled()
     expect(await checkReadiness()).toEqual({ ok: true })
   })
 
-  it('rejects an invalid flag value before doing any DB work', async () => {
+  it('rejects an invalid flag value at config load before any DB work', async () => {
     process.env['OPENFGA_MIGRATE_ON_START'] = 'maybe'
-    await expect(applyMigrationsOnStartIfEnabled()).rejects.toThrow(
-      /OPENFGA_MIGRATE_ON_START must be "true" or "false"/,
+    // Validation now lives in the schema parser. The fail-fast happens
+    // when the config is loaded, not when applyMigrationsOnStartIfEnabled
+    // runs — see docs/features/configuration.md §"Empty-String Semantics"
+    // and §"Validation Strategy".
+    await expect(reloadConfigForTests()).rejects.toThrow(
+      /must be 'true' or 'false'/,
     )
     // DB stays untouched — readiness still reports schema_missing.
     expect(await checkReadiness()).toMatchObject({ ok: false, reason: 'schema_missing' })
@@ -123,6 +133,7 @@ describe('applyMigrationsOnStartIfEnabled', () => {
     writeFileSync(corrupt, Buffer.from('this is not a sqlite database'))
     process.env['OPENFGA_DB_URL'] = `sqlite:${corrupt}`
     process.env['OPENFGA_MIGRATE_ON_START'] = 'true'
+    await reloadConfigForTests()
     await resetDb()
     try {
       await expect(applyMigrationsOnStartIfEnabled()).rejects.toThrow()
@@ -152,7 +163,7 @@ describe('applyMigrationsOnStartIfEnabled — logging contract', () => {
     await applyMigrationsOnStartIfEnabled()
     expect(debugSpy).toHaveBeenCalledTimes(1)
     const [obj, msg] = debugSpy.mock.calls[0]!
-    expect(obj).toMatchObject({ OPENFGA_MIGRATE_ON_START: null, enabled: false })
+    expect(obj).toMatchObject({ migrateOnStart: false })
     expect(msg).toMatch(/disabled — no migration will be attempted/)
     // Skipped path emits no INFO events.
     expect(infoSpy).not.toHaveBeenCalled()
@@ -160,18 +171,20 @@ describe('applyMigrationsOnStartIfEnabled — logging contract', () => {
 
   it('emits a DEBUG state line when the flag is explicitly false', async () => {
     process.env['OPENFGA_MIGRATE_ON_START'] = 'false'
+    await reloadConfigForTests()
     await applyMigrationsOnStartIfEnabled()
     const [obj, msg] = debugSpy.mock.calls[0]!
-    expect(obj).toMatchObject({ OPENFGA_MIGRATE_ON_START: 'false', enabled: false })
+    expect(obj).toMatchObject({ migrateOnStart: false })
     expect(msg).toMatch(/disabled/)
     expect(infoSpy).not.toHaveBeenCalled()
   })
 
   it('emits DEBUG state + INFO attempt + INFO success when the flag is true', async () => {
     process.env['OPENFGA_MIGRATE_ON_START'] = 'true'
+    await reloadConfigForTests()
     await applyMigrationsOnStartIfEnabled()
     const [debugObj, debugMsg] = debugSpy.mock.calls[0]!
-    expect(debugObj).toMatchObject({ OPENFGA_MIGRATE_ON_START: 'true', enabled: true })
+    expect(debugObj).toMatchObject({ migrateOnStart: true })
     expect(debugMsg).toMatch(/enabled/)
     const infoMessages = infoSpy.mock.calls.map((c: unknown[]) => c[0])
     expect(infoMessages).toEqual(['migrate_on_start_attempt', 'migrate_on_start_success'])

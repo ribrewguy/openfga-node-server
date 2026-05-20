@@ -24,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { buildApp } from '../../src/routes/index'
 import { createStore } from '../../src/storage/stores'
 import { bootstrapIntegrationDb } from '../_helpers/integration-bootstrap'
+import { reloadConfigForTests } from '../../src/config'
 import type { Hono } from 'hono'
 
 const bootstrap = await bootstrapIntegrationDb()
@@ -38,16 +39,22 @@ describeIfDb('openfga-fot regression — cross-store idempotency on /authorizati
   let app: Hono
   const previousMode = process.env['OPENFGA_IDEMPOTENCY_MODE']
 
-  beforeAll(() => {
+  beforeAll(async () => {
     // Middleware reads mode at composition time (buildApp), so the
-    // env var must be set BEFORE the app is built.
+    // configured value must be in effect BEFORE the app is built.
+    // With the c12 + Zod loader, that means: mutate process.env AND
+    // reload the live config Proxy via reloadConfigForTests so the
+    // middleware factory sees `optional` rather than the module-load
+    // default.
     process.env['OPENFGA_IDEMPOTENCY_MODE'] = 'optional'
+    await reloadConfigForTests()
     app = buildApp()
   })
 
-  afterAll(() => {
+  afterAll(async () => {
     if (previousMode === undefined) delete process.env['OPENFGA_IDEMPOTENCY_MODE']
     else process.env['OPENFGA_IDEMPOTENCY_MODE'] = previousMode
+    await reloadConfigForTests()
     // DB teardown is handled by the top-level bootstrap.teardown afterAll.
   })
 

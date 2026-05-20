@@ -108,13 +108,16 @@ Each row below names a Postgres-specific construct currently in the storage laye
 ### Timestamp microsecond precision
 
 - **Current Postgres**: `pool.ts` overrides `pgTypes.setTypeParser(1184/1114, v => v)` so timestamptz/timestamp return as raw text. JS `Date` truncates to milliseconds, which broke cursor pagination on tables where multiple rows share a wall-clock millisecond (`openfga-5uv`).
-- **SQLite**: better-sqlite3 returns columns by their declared affinity. Storing timestamps as ISO-8601 text (`TEXT`) preserves arbitrary precision. The Kysely `ColumnType` mapping returns `string` for both engines.
-- **Abstraction**: declare timestamp columns as `string` in the `Database` type. Postgres-side: keep the `setTypeParser` override at driver-construction time. SQLite-side: store timestamps as ISO-8601 text via `STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')` defaults. Cursor comparisons work identically in both engines because both compare ISO-8601 strings lexicographically when the format is fixed-width.
+- **SQLite**: better-sqlite3 returns columns by their declared affinity. Storing timestamps as ISO-8601 text (`TEXT`) preserves arbitrary precision _at the storage level_, but SQLite's `'now'` clock itself is millisecond-resolution — `STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')` yields three decimals regardless of the `subsec` modifier (tested SQLite 3.53). Same-millisecond inserts therefore share a `created_at` value. The Kysely `ColumnType` mapping returns `string` for both engines.
+- **Abstraction**: declare timestamp columns as `string` in the `Database` type. Postgres-side: keep the `setTypeParser` override at driver-construction time. SQLite-side: store timestamps as ISO-8601 text via `STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')` defaults. Cursor comparisons work identically in both engines because both compare ISO-8601 strings lexicographically when the format is fixed-width. Same-millisecond ordering ties on SQLite are resolved at the next layer:
+  - For `tuple_change`, the `seq` column (bigserial on Postgres, `rowid`-trigger on SQLite — see `migrations/1778083200000_tuple-change-seq.ts`) provides a strictly monotonic per-insert tiebreaker that the changes query orders by alongside `inserted_at`.
+  - For `store` and `authorization_model`, the application-side ULID generator in `src/storage/ids.ts` is monotonic-within-millisecond (`openfga-sp5`): same-ms calls increment the random suffix instead of regenerating it, so `ORDER BY id DESC` produces insertion-order results without a schema-level seq column.
 
 ### Clock-skew-safe idempotency claim
 
-- **Current Postgres**: `idempotency.ts` runs `DELETE ... WHERE created_at < now() - $::int * interval '1 millisecond'` so the cutoff is computed in SQL and shares the clock that wrote `created_at` (`openfga-how`).
+- **Current Postgres**: `idempotency.ts` runs `DELETE ... WHERE created_at <= now() - $::int * interval '1 millisecond'` so the cutoff is computed in SQL and shares the clock that wrote `created_at` (`openfga-how`).
 - **SQLite**: `STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || $ || ' milliseconds')` produces an equivalent cutoff using SQLite's modifier syntax.
+- **Boundary semantics**: the comparison is `<=` (and the lookup mirror is `>`) rather than `<` / `>=`, so a `ttlMs=0` sweep clears every existing row even on dialects whose cutoff and `created_at` resolve to the same millisecond instant. Postgres microsecond `now()` effectively never lands on the equality boundary in practice, so this is a no-op there; SQLite millisecond `now()` does land on the boundary, and `<` would silently leave the row in place (`openfga-sp5`).
 - **Abstraction**: a thin `dialectNowMinus(ms: number)` helper in `src/storage/dialect.ts` returns a Kysely `RawBuilder<string>` rendering the engine-appropriate expression. The idempotency module imports the helper rather than embedding SQL.
 
 ### UPSERT and RETURNING

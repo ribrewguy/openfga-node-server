@@ -17,8 +17,18 @@
  * kind of inconsistency that bites in production.
  */
 import { logger } from '../logger'
+import { config } from '../config'
 import { runMigrationsToLatest } from './migrator'
 
+/**
+ * Parse a raw OPENFGA_MIGRATE_ON_START string into a boolean.
+ *
+ * Retained for direct invocation by callers that have a raw env
+ * string in hand (and by the existing unit test that exercises the
+ * strict-bool grammar). Production code paths read the already-
+ * parsed `config.migrateOnStart` boolean from the loaded config
+ * instead, since the schema applies the same parser.
+ */
 export function parseMigrateOnStart(raw: string | undefined): boolean {
   const value = (raw ?? 'false').trim().toLowerCase()
   if (value !== 'true' && value !== 'false') {
@@ -49,10 +59,9 @@ export function parseMigrateOnStart(raw: string | undefined): boolean {
  *     exiting non-zero, so we avoid duplicate error events.
  */
 export async function applyMigrationsOnStartIfEnabled(): Promise<void> {
-  const rawEnv = process.env['OPENFGA_MIGRATE_ON_START']
-  const enabled = parseMigrateOnStart(rawEnv)
+  const enabled = config.migrateOnStart
   logger.debug(
-    { OPENFGA_MIGRATE_ON_START: rawEnv ?? null, enabled },
+    { migrateOnStart: enabled },
     enabled
       ? 'migrate_on_start_state: enabled — will run migrator.migrateToLatest() before binding sockets'
       : 'migrate_on_start_state: disabled — no migration will be attempted',

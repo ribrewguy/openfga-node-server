@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="NodeFGA logo">
+  <title>NodeFGA</title>
+  <desc>A four-node graph whose three edges trace the letter N.</desc>
+  <defs>
+    <!-- userSpaceOnUse so vertical/horizontal strokes (zero-width
+         object bounding boxes) still receive a visible gradient. -->
+    <linearGradient id="nodefga-grad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="200" y2="200">
+      <stop offset="0%" stop-color="#646cff"/>
+      <stop offset="100%" stop-color="#9499ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Edges trace the strokes of the letter N: left vertical, top-left
+       diagonal down to bottom-right, then right vertical. Drawn first so
+       node fills sit on top of stroke ends. -->
+  <g stroke="url(#nodefga-grad)" stroke-width="10" stroke-linecap="round" fill="none">
+    <line x1="42" y1="160" x2="42"  y2="42"/>
+    <line x1="42" y1="42"  x2="158" y2="158"/>
+    <line x1="158" y1="158" x2="158" y2="42"/>
+  </g>
+
+  <!-- Four nodes at the corners. -->
+  <g fill="url(#nodefga-grad)">
+    <circle cx="42"  cy="42"  r="20"/>
+    <circle cx="158" cy="42"  r="20"/>
+    <circle cx="42"  cy="158" r="20"/>
+    <circle cx="158" cy="158" r="20"/>
+  </g>
+</svg>

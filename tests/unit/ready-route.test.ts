@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { resetDb } from '../../src/storage/db'
 import { buildApp } from '../../src/routes/index'
 import { migrateToLatest } from '../_helpers/sqlite-bootstrap'
+import { reloadConfigForTests } from '../../src/config'
 
 const ENV_KEYS = ['OPENFGA_DB_URL', 'OPENFGA_DB_NAMESPACE'] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {}
@@ -24,6 +25,7 @@ beforeEach(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k]
   process.env['OPENFGA_DB_URL'] = ':memory:'
   delete process.env['OPENFGA_DB_NAMESPACE']
+  await reloadConfigForTests()
   await resetDb()
 })
 
@@ -33,6 +35,7 @@ afterEach(async () => {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
+  await reloadConfigForTests()
 })
 
 describe('GET /ready', () => {
@@ -55,6 +58,7 @@ describe('GET /ready', () => {
 
   it('returns 503 db_unreachable when the database cannot be queried', async () => {
     process.env['OPENFGA_DB_URL'] = 'sqlite:/dev/null/openfga.db'
+    await reloadConfigForTests()
     await resetDb()
     const app = buildApp()
     const res = await app.request('/ready')

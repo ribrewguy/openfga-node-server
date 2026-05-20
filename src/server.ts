@@ -8,99 +8,72 @@
  * Functions). The Hono app itself lives in `./index.ts`, which is what
  * such platforms import.
  *
- * Reads `OPENFGA_DB_URL` (Postgres DSN, must point at the openfga
- * schema from migrations/) and starts up to two listeners:
+ * Reads the resolved `config` (see `src/config.ts` and
+ * `docs/features/configuration.md`) for db.url, listener config, TLS
+ * paths, and the migrate-on-start gate. The schema in
+ * `src/config-schema.ts` enforces validation and cross-field rules
+ * (TLS pair-wise, port collision, no-listener-without-TLS) before
+ * this file ever sees the configuration. The remaining
+ * `requireDbUrl()` check covers the schema-optional `db.url` field at
+ * bootstrap, since the server cannot start without a database.
  *
- *   - HTTP on `OPENFGA_HTTP_PORT` (default 8080), unless
- *     `OPENFGA_HTTP_ENABLED=false` disables it.
- *   - HTTPS on `OPENFGA_HTTPS_PORT` (default 8443), only when
- *     `OPENFGA_TLS_CERT_FILE` and `OPENFGA_TLS_KEY_FILE` are both
- *     set. Use mkcert via `pnpm cert:create` for local dev.
- *
- * Both listeners may run simultaneously. At least one listener must
- * be active — disabling HTTP without TLS certs is a fatal misconfig.
- *
- * When `OPENFGA_MIGRATE_ON_START=true`, the bootstrap awaits
- * `migrator.migrateToLatest()` against `OPENFGA_DB_URL` before any
- * `serve()` call. Default is `false`. The flag lives only in this
- * self-host path; serverless / multi-instance deployments should
- * leave it off and continue running `pnpm migrate` as a deploy step.
- *
- * `dotenv/config` is imported first so a local `.env` file is loaded
- * before any other module reads `process.env`. In production the file
- * is typically absent and platform-injected env vars take over — the
- * import is a silent no-op when `.env` doesn't exist.
+ * `.env` discovery and parsing now flows through c12 inside
+ * `src/config.ts` (via `dotenv: true`), replacing the previous
+ * `import 'dotenv/config'` side effect at the top of this file.
  */
-import 'dotenv/config'
 import { readFileSync } from 'node:fs'
 import { createServer as createHttpsServer } from 'node:https'
 import { serve } from '@hono/node-server'
 import app from './index'
 import { logger } from './logger'
-import { applyMigrationsOnStartIfEnabled, parseMigrateOnStart } from './storage/migrate-on-start'
-import { describeDb } from './storage/db'
+import { config } from './config'
+import { applyMigrationsOnStartIfEnabled } from './storage/migrate-on-start'
+import { describeDb, requireDbUrl } from './storage/db'
 import { checkReadiness } from './storage/readiness'
+import { prefetchOidcJwks } from './middleware/oidc'
+import { initOtelSdk } from './observability/otel'
 
-if (!process.env['OPENFGA_DB_URL']) {
-  logger.fatal({ env: 'OPENFGA_DB_URL' }, 'required env var not set; refusing to start')
-  process.exit(1)
-}
-
-const rawHttpEnabled = (process.env['OPENFGA_HTTP_ENABLED'] ?? 'true').trim().toLowerCase()
-if (rawHttpEnabled !== 'true' && rawHttpEnabled !== 'false') {
-  logger.fatal(
-    { raw: process.env['OPENFGA_HTTP_ENABLED'] },
-    'OPENFGA_HTTP_ENABLED must be "true" or "false"',
-  )
-  process.exit(1)
-}
-const httpEnabled = rawHttpEnabled === 'true'
-
-const httpPort = Number(process.env['OPENFGA_HTTP_PORT'] ?? 8080)
-const httpsPort = Number(process.env['OPENFGA_HTTPS_PORT'] ?? 8443)
-
-const certFile = process.env['OPENFGA_TLS_CERT_FILE']
-const keyFile = process.env['OPENFGA_TLS_KEY_FILE']
-
-if (Boolean(certFile) !== Boolean(keyFile)) {
-  logger.fatal(
-    'OPENFGA_TLS_CERT_FILE and OPENFGA_TLS_KEY_FILE must both be set together (or both unset for HTTP-only)',
-  )
-  process.exit(1)
-}
-
-const tlsEnabled = Boolean(certFile && keyFile)
-
-if (!httpEnabled && !tlsEnabled) {
-  logger.fatal(
-    'OPENFGA_HTTP_ENABLED=false requires OPENFGA_TLS_CERT_FILE and OPENFGA_TLS_KEY_FILE to be set; otherwise the server has no listener',
-  )
-  process.exit(1)
-}
-
-if (httpEnabled && tlsEnabled && httpPort === httpsPort) {
-  logger.fatal(
-    { httpPort, httpsPort },
-    'OPENFGA_HTTP_PORT and OPENFGA_HTTPS_PORT cannot be equal when both listeners are active',
-  )
-  process.exit(1)
-}
-
-// Validate OPENFGA_MIGRATE_ON_START up front so a malformed value is
-// fatal at boot rather than at the moment migrations would run. The
-// actual migrator invocation happens below, before any `serve()` call.
+// Initialize OpenTelemetry SDK BEFORE any other module that might
+// participate in tracing. No-op when config.otel.enabled is false —
+// the SDK is never imported in that path. Failure (bad exporter
+// URL, unsupported propagator) is fatal at boot.
 try {
-  parseMigrateOnStart(process.env['OPENFGA_MIGRATE_ON_START'])
+  await initOtelSdk()
 }
 catch (err) {
-  logger.fatal({ err }, 'invalid OPENFGA_MIGRATE_ON_START')
+  logger.fatal({ err, reason: 'otel_setup_failed' }, 'otel_setup_failed; refusing to start')
   process.exit(1)
 }
 
-// Run migrations against OPENFGA_DB_URL before binding sockets when
-// the operator has explicitly opted in. Failure here is fatal — the
-// server must not accept traffic against a half-migrated database.
-// See src/storage/migrate-on-start.ts for why this lives in
+try {
+  requireDbUrl(config.db.url)
+}
+catch (err) {
+  logger.fatal({ err }, 'required configuration not set; refusing to start')
+  process.exit(1)
+}
+
+// When OIDC auth is enabled, resolve issuer discovery + JWKS BEFORE
+// binding any listener. A misconfigured issuer (typo, network
+// partition, unpublished `.well-known/openid-configuration`) must
+// surface as a FATAL boot log rather than as 401s on every
+// authenticated request. The Hono middleware factory has its own
+// lazy promise for non-server callers, but the production boot path
+// is intentionally fail-fast.
+if (config.auth.mode === 'oidc') {
+  try {
+    await prefetchOidcJwks(config.auth.oidc)
+  }
+  catch (err) {
+    logger.fatal({ err, reason: 'oidc_discovery_failed' }, 'oidc_setup_failed; refusing to start')
+    process.exit(1)
+  }
+}
+
+// Run migrations against the configured database before binding
+// sockets when the operator has explicitly opted in. Failure here is
+// fatal — the server must not accept traffic against a half-migrated
+// database. See src/storage/migrate-on-start.ts for why this lives in
 // server.ts (NOT index.ts).
 try {
   await applyMigrationsOnStartIfEnabled()
@@ -120,14 +93,13 @@ catch (err) {
 //     problem the operator must resolve before the server can serve
 //     any traffic.
 //   - schema_missing: fatal UNLESS the operator opted into
-//     OPENFGA_MIGRATE_ON_START. In the migrate-on-start path the
-//     migrator already ran above; if it succeeded but the readiness
-//     probe still reports schema_missing, surface a warn and let the
+//     migrateOnStart. In the migrate-on-start path the migrator
+//     already ran above; if it succeeded but the readiness probe
+//     still reports schema_missing, surface a warn and let the
 //     /ready endpoint report the live state from there.
-const migrateOnStart = parseMigrateOnStart(process.env['OPENFGA_MIGRATE_ON_START'])
 const readiness = await checkReadiness()
 if (!readiness.ok) {
-  if (readiness.reason === 'schema_missing' && migrateOnStart) {
+  if (readiness.reason === 'schema_missing' && config.migrateOnStart) {
     logger.warn(
       { readiness, db: describeDb() },
       'storage_schema_missing_after_migrate_on_start',
@@ -144,24 +116,24 @@ if (!readiness.ok) {
 // Emit the resolved driver state at INFO so operators can see at a
 // glance which database the server is actually connected to — derived
 // from the live pg.Pool / better-sqlite3 instance, not by re-parsing
-// OPENFGA_DB_URL.
+// the configured db.url.
 logger.info(describeDb(), 'storage_connected')
 
-if (httpEnabled) {
-  serve({ fetch: app.fetch, port: httpPort }, (info) => {
+if (config.listeners.http.enabled) {
+  serve({ fetch: app.fetch, port: config.listeners.http.port }, (info) => {
     logger.info({ protocol: 'http', port: info.port }, 'server_listening')
   })
 }
 
-if (certFile && keyFile) {
+if (config.tls.certFile && config.tls.keyFile) {
   serve(
     {
       fetch: app.fetch,
-      port: httpsPort,
+      port: config.listeners.https.port,
       createServer: createHttpsServer,
       serverOptions: {
-        key: readFileSync(keyFile),
-        cert: readFileSync(certFile),
+        key: readFileSync(config.tls.keyFile),
+        cert: readFileSync(config.tls.certFile),
       },
     },
     (info) => {

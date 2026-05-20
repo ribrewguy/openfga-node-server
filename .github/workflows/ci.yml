@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v6.0.5
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -32,6 +32,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
@@ -53,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v6.0.5
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -61,6 +67,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
@@ -94,7 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v6.0.5
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -102,6 +114,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
@@ -123,7 +141,7 @@ jobs:
       # exposed to fork runs.
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && github.event.pull_request.head.repo.fork != true }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
@@ -160,7 +178,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@v6.0.5
         with:
           version: ${{ env.PNPM_VERSION }}
 
@@ -168,6 +186,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # Ensure node-gyp is on PATH so better-sqlite3's postinstall has a
+      # source-build fallback when prebuild-install cannot find a binary
+      # for the runner's exact Node patch / ABI. Static command, no
+      # untrusted input.
+      - run: npm install -g node-gyp
 
       - run: pnpm install --frozen-lockfile
 
