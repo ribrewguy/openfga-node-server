@@ -141,7 +141,7 @@ jobs:
       # exposed to fork runs.
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && github.event.pull_request.head.repo.fork != true }}
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
